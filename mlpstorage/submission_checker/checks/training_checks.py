@@ -30,7 +30,7 @@ class TrainingCheck(BaseCheck):
         self.name = "training checks"
         self.datagen_path = os.path.join(self.path, "datagen")
         self.run_path = os.path.join(self.path, "run")
-        self.checks = self.init_checks()
+        self.init_checks()
 
     def init_checks(self):
         self.checks = []
