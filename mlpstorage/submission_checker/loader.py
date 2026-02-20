@@ -128,8 +128,10 @@ class Loader:
                                 for timestamp in list_dir(checkpoint_path):
                                     timestamp_path = os.path.join(checkpoint_path, timestamp)
                                     summary_path = os.path.join(timestamp_path, "summary.json")
+                                    metadata_path = self.find_metadata_path(timestamp_path)
+                                    metadata_file = self.load_single_log(metadata_path, "Metadata")
                                     checkpoint_file = self.load_single_log(summary_path, "Summary")
-                                    checkpoint_files.append((checkpoint_file, timestamp))
+                                    checkpoint_files.append((checkpoint_file, metadata_file, timestamp))
                                 yield SubmissionLogs(checkpoint_files=checkpoint_files, system_file=system_file, loader_metadata=loader_metadata)
 
                             

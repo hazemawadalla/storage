@@ -27,6 +27,7 @@ class CheckpointingCheck(BaseCheck):
         self.config = config
         self.submissions_logs = submissions_logs.checkpoint_files
         self.name = "checkpointing checks"
+        self.mode = submissions_logs.loader_metadata.mode
         self.checks = []
         self.checkpointing_path = self.path
         self.init_checks()
@@ -50,6 +51,8 @@ class CheckpointingCheck(BaseCheck):
         Verify that checkpoint data written per node > 3x node memory.
         """
         valid = True
+        if self.mode != "checkpointing":
+            return valid
         
         for summary, metadata, _ in self.submissions_logs:
             checkpoint_size_gb = summary.get("metric", {}).get("checkpoint_size_GB", 0)
@@ -78,6 +81,8 @@ class CheckpointingCheck(BaseCheck):
         Verify that fsync is enabled in checkpoint configuration.
         """
         valid = True
+        if self.mode != "checkpointing":
+            return valid
         
         for summary, metadata, _ in self.submissions_logs:
             combined_params = metadata.get("combined_params", {})
@@ -95,6 +100,9 @@ class CheckpointingCheck(BaseCheck):
         Verify benchmark uses one of the four supported models.
         """
         valid = True
+        if self.mode != "checkpointing":
+            return valid
+        
         allowed_models = {"8b", "70b", "405b", "1t"}
         
         for summary, metadata, _ in self.submissions_logs:
@@ -117,7 +125,10 @@ class CheckpointingCheck(BaseCheck):
         """
         For CLOSED submissions, verify MPI processes match requirements per model.
         """
+        # Question: is this num_processes? Reference does not have all matching
         valid = True
+        if self.mode != "checkpointing":
+            return valid
         
         model_process_requirements = {
             "8b": 8,
@@ -127,7 +138,7 @@ class CheckpointingCheck(BaseCheck):
         }
         
         for summary, metadata, _ in self.submissions_logs:
-            verification = metadata.get("verification", "open")
+            verification = metadata.get("verification", "closed")
             
             if verification == "closed":
                 model_name = metadata.get("args", {}).get("model", "").lower()
@@ -154,7 +165,9 @@ class CheckpointingCheck(BaseCheck):
         For CLOSED submissions, verify accelerators per host > 4 and total matches requirement.
         """
         valid = True
-        
+        if self.mode != "checkpointing":
+            return valid
+
         for summary, metadata, _ in self.submissions_logs:
             verification = metadata.get("verification", "open")
             
@@ -179,6 +192,9 @@ class CheckpointingCheck(BaseCheck):
         H100 has 80GB per accelerator.
         """
         valid = True
+        if self.mode != "checkpointing":
+            return valid
+        
         ACCELERATOR_MEMORY_GB = 80  # H100
         
         for summary, metadata, _ in self.submissions_logs:
@@ -201,7 +217,10 @@ class CheckpointingCheck(BaseCheck):
         """
         For CLOSED submissions, verify only allowed parameters are modified.
         """
+        # Question: what are the default values of the other parameters that need to be checked
         valid = True
+        if self.mode != "checkpointing":
+            return valid
         
         allowed_params = {
             "checkpoint.checkpoint_folder"
@@ -228,6 +247,8 @@ class CheckpointingCheck(BaseCheck):
         Verify checkpoint folder and output paths are set and different.
         """
         valid = True
+        if self.mode != "checkpointing":
+            return valid
         
         for summary, metadata, _ in self.submissions_logs:
             args = metadata.get("args", {})
@@ -256,6 +277,8 @@ class CheckpointingCheck(BaseCheck):
         For subset runs, verify exactly 8 accelerators and not 8B model.
         """
         valid = True
+        if self.mode != "checkpointing":
+            return valid
         
         for summary, metadata, _ in self.submissions_logs:
             params_dict = metadata.get("params_dict", {})

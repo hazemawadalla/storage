@@ -21,7 +21,10 @@ from .checks.training_checks import TrainingCheck
 # Import result exporter
 from .results import ResultExporter
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format="[%(asctime)s %(filename)s:%(lineno)d %(levelname)s] %(message)s"
+)
 log = logging.getLogger("main")
 
 def get_args():

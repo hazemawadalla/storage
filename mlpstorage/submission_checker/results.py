@@ -18,7 +18,37 @@ class ResultExporter:
             csv_path (str): Path to the output CSV file.
             config (Config): Configuration helper for model mappings.
         """
-        self.head = []
+        # Question: Is the final table defined?
+        self.head = [
+            "Public ID",
+            "Organization",
+            "Submission Name",
+            "Description",
+            "Type",
+            "Access Protocol",
+            "Availability",
+            "RUs",
+            "Integrated Client Storage",
+            "Accelerator Type",
+            "# Client Nodes",
+            # TODO: Avoid hardcoding this
+            # Training
+            "3D-Unet - # Accel",
+            "3D-Unet - Read B/W (GB/s)",
+            "ResNet-50 - # Accel",
+            "ResNet-50 - Read B/W (GB/s)",
+            "CosmoFlow - # Accel",
+            "CosmoFlow - Read B/W (GB/s)",
+            # Checkpointing
+            "8B - Write B/W (GB/s)",
+            "8B - Read B/W (GB/s)",
+            "70B - Write B/W (GB/s)",
+            "70B - Read B/W (GB/s)",
+            "405B - Write B/W (GB/s)",
+            "405B - Read B/W (GB/s)",
+            "1T - Write B/W (GB/s)",
+            "1T - Read B/W (GB/s)",
+        ]
         self.rows = []
         self.csv_path = csv_path
         self.config = config

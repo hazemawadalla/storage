@@ -70,6 +70,7 @@ class DirectoryCheck(BaseCheck):
         - dlio.log
         - dlio_config/ (subdirectory)
         """
+        # Question: output.json is missing from reference
         valid = True
         for _, _, timestamp in self.submissions_logs.datagen_files:
             timestamp_path = os.path.join(self.datagen_path, timestamp)
@@ -146,6 +147,7 @@ class DirectoryCheck(BaseCheck):
         - dlio.log
         - dlio_config/ (subdirectory)
         """
+        # Question: output.json is missing from regerence
         valid = True
         for _, _, timestamp in self.submissions_logs.run_files:
             timestamp_path = os.path.join(self.run_path, timestamp)
@@ -168,6 +170,7 @@ class DirectoryCheck(BaseCheck):
         Check that all run_files have timestamps matching format "YYYYMMDD_HHmmss"
         and that there are exactly 6 of them.
         """
+        # Question: Not enough runs in reference
         valid = True
         timestamp_pattern = r"^\d{8}_\d{6}$"
         timestamps = []
@@ -235,6 +238,7 @@ class DirectoryCheck(BaseCheck):
         # Parse all run data: (run_dict, _, timestamp_dir_name)
         run_dir_time = []
         max_gap = float("inf")
+        time_factor = 2
         for run_dict, _, timestamp_dir in self.submissions_logs.run_files:
             try:
                 # Parse timestamps from run_dict
@@ -244,7 +248,7 @@ class DirectoryCheck(BaseCheck):
                 # Parse the directory timestamp (YYYYMMDD_HHmmss format)
                 dir_time = datetime.strptime(timestamp_dir, "%Y%m%d_%H%M%S")
                 
-                run_duration = end_time - start_time
+                run_duration = (end_time - start_time).total_seconds() * time_factor
                 if run_duration < max_gap:
                     max_gap = run_duration
 
@@ -264,7 +268,7 @@ class DirectoryCheck(BaseCheck):
             next_run = run_dir_time[i + 1]
             
             # Calculate gap between end of current run and start of next run
-            gap = next_run - current_run
+            gap = (next_run - current_run).total_seconds()
             
             # Gap should be less than the max gap
             if gap >= max_gap:

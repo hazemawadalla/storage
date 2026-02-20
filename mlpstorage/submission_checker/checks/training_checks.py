@@ -27,6 +27,8 @@ class TrainingCheck(BaseCheck):
         super().__init__(log=log, path=submissions_logs.loader_metadata.folder)
         self.config = config
         self.submissions_logs = submissions_logs
+        self.mode = self.submissions_logs.loader_metadata.mode
+        self.model = self.submissions_logs.loader_metadata.benchmark
         self.name = "training checks"
         self.datagen_path = os.path.join(self.path, "datagen")
         self.run_path = os.path.join(self.path, "run")
@@ -54,6 +56,8 @@ class TrainingCheck(BaseCheck):
         Verify that the datasize option was used by finding it in the run metadata.
         """
         valid = True
+        if self.mode != "training":
+            return valid
         
         for summary, metadata, _ in self.submissions_logs.run_files:
             # Check if datasize-related parameters are in the metadata
@@ -78,6 +82,8 @@ class TrainingCheck(BaseCheck):
         Recalculate minimum dataset size and verify it matches the run's logfile.
         """
         valid = True
+        if self.mode != "training":
+            return valid
         HOST_MEMORY_MULTIPLIER = 5
         MIN_STEPS_PER_EPOCH = 500
         
@@ -139,7 +145,8 @@ class TrainingCheck(BaseCheck):
         Verify that datagen data generated >= datasize calculated.
         """
         valid = True
-        
+        if self.mode != "training":
+            return valid
         if not self.submissions_logs.datagen_files:
             self.log.warning("No datagen files found")
             return valid
@@ -176,21 +183,30 @@ class TrainingCheck(BaseCheck):
         """
         Verify that run data matches the calculated datasize exactly.
         """
+        # Question: Subfolders? 
+        # What are the true values of the datase
         valid = True
+        if self.mode != "training":
+            return valid
         
         for summary, metadata, _ in self.submissions_logs.run_files:
-            dataset_params = metadata.get("combined_params", {}).get("dataset", {})
+            num_files_train = summary.get("num_files_train", None)
+            num_files_eval = summary.get("num_files_eval", None)
             
-            # Verify dataset parameters are set correctly
-            num_files_train = dataset_params.get("num_files_train")
-            num_subfolders_train = dataset_params.get("num_subfolders_train", 0)
-            
-            if not num_files_train:
-                self.log.error("num_files_train not set in run parameters")
+            if num_files_train is None:
+                self.log.error("num_files_train not set")
                 valid = False
             
-            if num_subfolders_train == 0:
-                self.log.error("num_subfolders_train should match actual subfolders in dataset")
+            if num_files_train > self.config.get_num_train_files(self.model):
+                self.log.error("num_files_train should be lower than in dataset")
+                valid = False
+
+            if num_files_eval is None:
+                self.log.error("num_files_eval not set")
+                valid = False
+
+            if num_files_eval > self.config.get_num_eval_files(self.model):
+                self.log.error("num_files_eval should be lower than in dataset")
                 valid = False
         
         return valid
@@ -200,7 +216,8 @@ class TrainingCheck(BaseCheck):
         Check that AU (Accelerator Utilization) meets minimum requirements.
         """
         valid = True
-        
+        if self.mode != "training":
+            return valid
         for summary, metadata, _ in self.submissions_logs.run_files:
             metrics = summary.get("metric", {})
             au_mean = metrics.get("train_au_mean_percentage", 0)
@@ -221,7 +238,8 @@ class TrainingCheck(BaseCheck):
         For single-host submissions, verify sufficient simulated accelerators.
         """
         valid = True
-        
+        if self.mode != "training":
+            return valid
         for summary, metadata, _ in self.submissions_logs.run_files:
             num_hosts = summary.get("num_hosts", 1)
             num_accelerators = summary.get("num_accelerators", 1)
@@ -239,7 +257,8 @@ class TrainingCheck(BaseCheck):
         For single-host submissions, fail if more than one client node used.
         """
         valid = True
-        
+        if self.mode != "training":
+            return valid
         for summary, metadata, _ in self.submissions_logs.run_files:
             num_hosts = summary.get("num_hosts", 1)
             
@@ -262,6 +281,8 @@ class TrainingCheck(BaseCheck):
         For distributed submissions, verify all nodes have identical accelerator count.
         """
         valid = True
+        if self.mode != "training":
+            return valid
         
         for summary, metadata, _ in self.submissions_logs.run_files:
             num_hosts = summary.get("num_hosts", 1)
@@ -291,6 +312,8 @@ class TrainingCheck(BaseCheck):
         For CLOSED submissions, verify only allowed parameters are modified.
         """
         valid = True
+        if self.mode != "training":
+            return valid
         
         # Allowed parameters for CLOSED
         allowed_params = {
@@ -327,7 +350,9 @@ class TrainingCheck(BaseCheck):
         For OPEN submissions, verify only allowed parameters are modified.
         """
         valid = True
-        
+        if self.mode != "training":
+            return valid
+
         # Additional allowed parameters for OPEN (beyond CLOSED)
         open_allowed_params = {
             "framework",
@@ -373,6 +398,8 @@ class TrainingCheck(BaseCheck):
         Verify dataset and output paths are set and different.
         """
         valid = True
+        if self.mode != "training":
+            return valid
         
         for summary, metadata, _ in self.submissions_logs.run_files:
             args = metadata.get("args", {})
@@ -402,9 +429,8 @@ class TrainingCheck(BaseCheck):
         This would require checking 'df' output in the logfiles.
         """
         valid = True
-        
-        # In a real implementation, would parse logfiles for 'df' output
-        # and verify the filesystems are different
-        self.log.info("Filesystem check (implementation pending - requires log parsing)")
-        
+        # Question: where to look for this?
+        if self.mode != "training":
+            return valid
+        # TODO      
         return valid

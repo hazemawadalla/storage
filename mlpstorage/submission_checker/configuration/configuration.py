@@ -27,3 +27,9 @@ class Config:
     
     def get_checkpoint_required_folders(self):
         return CHECKPOINT_REQUIRED_FOLDERS[self.version]
+    
+    def get_num_train_files(self, model):
+        return NUM_DATASET_TRAIN_FILES[model]
+    
+    def get_num_eval_files(self, model):
+        return NUM_DATASET_EVAL_FILES[model]

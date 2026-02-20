@@ -18,9 +18,9 @@ PARSER_MAP = {
 }
 
 DATAGEN_REQUIRED_FILES = {
-    "v2.0": ["training_datagen.stdout.log", "training_datagen.stderr.log", "*output.json", "*per_epoch_stats.json", "*summary.json", "dlio.log"],
-    "v3.0": ["training_datagen.stdout.log", "training_datagen.stderr.log", "*output.json", "*per_epoch_stats.json", "*summary.json", "dlio.log"],
-    "default": ["training_datagen.stdout.log", "training_datagen.stderr.log", "*output.json", "*per_epoch_stats.json", "*summary.json", "dlio.log"],
+    "v2.0": [r"training_datagen\.stdout.log", r"training_datagen.stderr\.log", r".*output\.json$", r".*per_epoch_stats\.json$", r".*summary\.json$", r"dlio\.log"],
+    "v3.0": [r"training_datagen\.stdout.log", r"training_datagen.stderr\.log", r".*output\.json$", r".*per_epoch_stats\.json$", r",*summary\.json$", r"dlio\.log"],
+    "default": [r"training_datagen\.stdout.log", r"training_datagen.stderr\.log", r".*output\.json$", r".*per_epoch_stats\.json$", r".*summary\.json$", r"dlio\.log"],
 }
 
 DATAGEN_REQUIRED_FOLDERS = {
@@ -30,9 +30,9 @@ DATAGEN_REQUIRED_FOLDERS = {
 }
 
 RUN_REQUIRED_FILES = {
-    "v2.0": ["training_run.stdout.log", "training_run.stderr.log", "*output.json", "*per_epoch_stats.json", "*summary.json", "dlio.log"],
-    "v3.0": ["training_run.stdout.log", "training_run.stderr.log", "*output.json", "*per_epoch_stats.json", "*summary.json", "dlio.log"],
-    "default": ["training_run.stdout.log", "training_datagen.stderr.log", "*output.json", "*per_epoch_stats.json", "*summary.json", "dlio.log"],
+    "v2.0": [r"training_run\.stdout.log", r"training_run\.stderr.log", r".*output\.json", r".*per_epoch_stats\.json", r".*summary\.json", r"dlio\.log"],
+    "v3.0": [r"training_run\.stdout.log", r"training_run\.stderr.log", r".*output\.json", r".*per_epoch_stats\.json", r".*summary\.json", r"dlio\.log"],
+    "default": [r"training_run\.stdout.log", r"training_run\.stderr.log", r".*output\.json", r".*per_epoch_stats\.json", r".*summary\.json", r"dlio\.log"],
 }
 
 RUN_REQUIRED_FOLDERS = {
@@ -42,13 +42,38 @@ RUN_REQUIRED_FOLDERS = {
 }
 
 CHECKPOINT_REQUIRED_FILES = {
-    "v2.0": ["training_run.stdout.log", "training_run.stderr.log", "*output.json", "*per_epoch_stats.json", "*summary.json", "dlio.log"],
-    "v3.0": ["training_run.stdout.log", "training_run.stderr.log", "*output.json", "*per_epoch_stats.json", "*summary.json", "dlio.log"],
-    "default": ["training_run.stdout.log", "training_datagen.stderr.log", "*output.json", "*per_epoch_stats.json", "*summary.json", "dlio.log"],
+    "v2.0": [r"training_run\.stdout.log", r"training_run\.stderr.log", r".*output\.json", r".*per_epoch_stats\.json", r".*summary\.json", r"dlio\.log"],
+    "v3.0": [r"training_run\.stdout.log", r"training_run\.stderr.log", r".*output\.json", r".*per_epoch_stats\.json", r".*summary\.json", r"dlio\.log"],
+    "default": [r"training_run\.stdout.log", r"training_run\.stderr.log", r".*output\.json", r".*per_epoch_stats\.json", r".*summary\.json", r"dlio\.log"],
 }
 
 CHECKPOINT_REQUIRED_FOLDERS = {
     "v2.0": ["dlio_config"],
     "v3.0": ["dlio_config"],
     "default": ["dlio_config"],
+}
+
+# TODO: Ask for correct values
+NUM_DATASET_TRAIN_FILES = {
+    "cosmoflow": 524288,
+    "resnet50": 10391,
+    "unet3d": 14000
+}
+
+NUM_DATASET_EVAL_FILES = {
+    "cosmoflow": 0,
+    "resnet50": 0,
+    "unet3d": 0
+}
+
+NUM_DATASET_TRAIN_FOLDERS = {
+    "cosmoflow": 0,
+    "resnet50": 0,
+    "unet3d": 0
+}
+
+NUM_DATASET_EVAL_FOLDERS = {
+    "cosmoflow": 0,
+    "resnet50": 0,
+    "unet3d": 0
 }
