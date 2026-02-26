@@ -70,12 +70,13 @@ class DirectoryCheck(BaseCheck):
         - dlio.log
         - dlio_config/ (subdirectory)
         """
-        # Question: output.json is missing from reference
         valid = True
         for _, _, timestamp in self.submissions_logs.datagen_files:
             timestamp_path = os.path.join(self.datagen_path, timestamp)
             files = list_files(timestamp_path)
             for required_file in self.config.get_datagen_required_files():
+                if self.config.skip_output_file and required_file == "*output.json":
+                    continue
                 if not regex_matches_any(required_file, files):
                     self.log.error("%s not found in %s", required_file, timestamp_path)
                     valid = False
@@ -147,12 +148,13 @@ class DirectoryCheck(BaseCheck):
         - dlio.log
         - dlio_config/ (subdirectory)
         """
-        # Question: output.json is missing from regerence
         valid = True
         for _, _, timestamp in self.submissions_logs.run_files:
             timestamp_path = os.path.join(self.run_path, timestamp)
             files = list_files(timestamp_path)
             for required_file in self.config.get_run_required_files():
+                if self.config.skip_output_file and required_file == "*output.json":
+                    continue
                 if not regex_matches_any(required_file, files):
                     self.log.error("%s not found in %s", required_file, timestamp_path)
                     valid = False
@@ -171,6 +173,7 @@ class DirectoryCheck(BaseCheck):
         and that there are exactly 6 of them.
         """
         # Question: Not enough runs in reference
+        # v2.0 only 5 required
         valid = True
         timestamp_pattern = r"^\d{8}_\d{6}$"
         timestamps = []

@@ -184,7 +184,7 @@ class TrainingCheck(BaseCheck):
         Verify that run data matches the calculated datasize exactly.
         """
         # Question: Subfolders? 
-        # What are the true values of the datase
+        # What are the true values of the dataset
         valid = True
         if self.mode != "training":
             return valid

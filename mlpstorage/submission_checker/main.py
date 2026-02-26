@@ -49,6 +49,11 @@ def get_args():
         "--csv",
         default="summary.csv",
         help="csv file with results")
+    parser.add_argument(
+        "--skip-output-file",
+        action="store_true",
+        help="Skip check output file"
+    )
     args = parser.parse_args()
     return args
 
@@ -66,7 +71,11 @@ def main():
     args = get_args()
     
     submitters = str(args.submitters).split(",")
-    config = Config(version=args.version, submitters=submitters)
+    config = Config(
+        version=args.version,
+        submitters=submitters,
+        skip_output_file=args.skip_output_file
+    )
     
     loader = Loader(args.input, args.version, config)
     exporter = ResultExporter(args.csv, config)

@@ -1,9 +1,10 @@
 from ..constants import *
 
 class Config:
-    def __init__(self, version, submitters):
+    def __init__(self, version, submitters, skip_output_file = False):
         self.version = version
         self.submitters = submitters
+        self.skip_output_file = skip_output_file
         
     def check_submitter(self, submitter):
         if self.submitters is None:
@@ -33,3 +34,6 @@ class Config:
     
     def get_num_eval_files(self, model):
         return NUM_DATASET_EVAL_FILES[model]
+    
+    def get_checkpoint_file(self, model):
+        return CHECKPOINT_FILE_MAP[model]

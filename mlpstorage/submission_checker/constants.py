@@ -77,3 +77,10 @@ NUM_DATASET_EVAL_FOLDERS = {
     "resnet50": 0,
     "unet3d": 0
 }
+
+CHECKPOINT_FILE_MAP = {
+    "llama3-1t": "llama3_1t.yaml",
+    "llama3-8b": "llama3_8b.yaml",
+    "llama3-70b": "llama3_70b.yaml",
+    "llama3-405b": "llama3_405b.yaml",
+}

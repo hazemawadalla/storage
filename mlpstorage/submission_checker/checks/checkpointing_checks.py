@@ -6,6 +6,7 @@ from ..loader import SubmissionLogs
 
 import os
 import re
+import yaml
 
 
 class CheckpointingCheck(BaseCheck):
@@ -28,6 +29,7 @@ class CheckpointingCheck(BaseCheck):
         self.submissions_logs = submissions_logs.checkpoint_files
         self.name = "checkpointing checks"
         self.mode = submissions_logs.loader_metadata.mode
+        self.benchmark = submissions_logs.loader_metadata.benchmark
         self.checks = []
         self.checkpointing_path = self.path
         self.init_checks()
@@ -125,7 +127,6 @@ class CheckpointingCheck(BaseCheck):
         """
         For CLOSED submissions, verify MPI processes match requirements per model.
         """
-        # Question: is this num_processes? Reference does not have all matching
         valid = True
         if self.mode != "checkpointing":
             return valid
@@ -141,22 +142,32 @@ class CheckpointingCheck(BaseCheck):
             verification = metadata.get("verification", "closed")
             
             if verification == "closed":
+                checkpoint_mode = metadata.get("params_dict", {}).get("checkpoint.mode", "").lower()
                 model_name = metadata.get("args", {}).get("model", "").lower()
                 num_processes = metadata.get("args", {}).get("num_processes", 0)
-                
-                model_size = re.search(r"(8b|70b|405b|1t)", model_name)
-                if model_size:
-                    model_key = model_size.group(1)
-                    required_processes = model_process_requirements.get(model_key)
-                    
-                    if required_processes and num_processes != required_processes:
+                if checkpoint_mode == "subset":
+                    if num_processes != 8:
                         self.log.error(
-                            "CLOSED submission with model %s requires %d processes, got %d",
+                            "CLOSED submission with model %s in subset mode requires %d processes, got %d",
                             model_key,
-                            required_processes,
+                            8,
                             num_processes
                         )
                         valid = False
+                else:
+                    model_size = re.search(r"(8b|70b|405b|1t)", model_name)
+                    if model_size:
+                        model_key = model_size.group(1)
+                        required_processes = model_process_requirements.get(model_key)
+                        
+                        if required_processes and num_processes != required_processes:
+                            self.log.error(
+                                "CLOSED submission with model %s requires %d processes, got %d",
+                                model_key,
+                                required_processes,
+                                num_processes
+                            )
+                            valid = False
         
         return valid
     
@@ -213,33 +224,108 @@ class CheckpointingCheck(BaseCheck):
         
         return valid
     
+    def _get_nested_value(self, config_dict, key_path):
+        """
+        Get a value from nested dictionary using dot notation.
+        Example: "checkpoint.fsync" -> config_dict["checkpoint"]["fsync"]
+        
+        Args:
+            config_dict: The dictionary to search
+            key_path: Dot-separated key path
+            
+        Returns:
+            The value if found, None otherwise
+        """
+        keys = key_path.split(".")
+        current = config_dict
+        
+        for key in keys:
+            if isinstance(current, dict) and key in current:
+                current = current[key]
+            else:
+                return None
+        
+        return current
+    
+    def _get_nested_items(self, d, prefix = ""):
+        for key, value in d.items():
+            if isinstance(value, dict):
+                p = prefix + "." if prefix != "" else ""
+                yield from self._get_nested_items(value, prefix = p + key)
+            else:
+                p = prefix + "." if prefix != "" else prefix
+                yield (p + key, value)
+    
     def closed_checkpoint_parameters(self):
         """
-        For CLOSED submissions, verify only allowed parameters are modified.
+        For CLOSED submissions, verify yaml parameters match reference file.
+        Only checkpoint_folder is allowed to differ.
         """
-        # Question: what are the default values of the other parameters that need to be checked
+        
+        config_ref_path = os.path.join(os.path.dirname(__file__),
+            os.pardir,
+            os.pardir,
+            os.pardir,
+            "configs",
+            "dlio",
+            "workload"
+        )
+        config_ref_file = self.config.get_checkpoint_file(self.benchmark)
         valid = True
         if self.mode != "checkpointing":
             return valid
+        # Load reference YAML file
+        config_ref_full_path = os.path.join(config_ref_path, config_ref_file)
+        if not os.path.exists(config_ref_full_path):
+            self.log.error(
+                "Reference config file not found: %s",
+                config_ref_full_path
+            )
+            return False
         
-        allowed_params = {
+        try:
+            with open(config_ref_full_path, 'r') as f:
+                reference_config = yaml.safe_load(f)
+        except Exception as e:
+            self.log.error(
+                "Failed to load reference config file %s: %s",
+                config_ref_full_path,
+                str(e)
+            )
+            return False
+        
+        allowed_diff_params = {
             "checkpoint.checkpoint_folder"
         }
-        
         for summary, metadata, _ in self.submissions_logs:
             verification = metadata.get("verification", "open")
-            
             if verification == "closed":
-                params_dict = metadata.get("params_dict", {})
+                yaml_params = metadata.get("yaml_params", {})
                 
-                for param_key in params_dict.keys():
-                    if param_key not in allowed_params:
+                # Compare yaml parameters with reference config
+                for key, value in self._get_nested_items(yaml_params):
+                    # Skip allowed differing parameters
+                    if key in allowed_diff_params:
+                        continue
+                    
+                    # Navigate reference config to find the parameter
+                    ref_value = self._get_nested_value(reference_config, key)
+                    
+                    if ref_value is None:
                         self.log.error(
-                            "CLOSED submission modifies disallowed parameter: %s",
-                            param_key
+                            "Parameter %s not found in reference config",
+                            key
                         )
                         valid = False
-        
+                    elif value != ref_value:
+                        self.log.error(
+                            "CLOSED submission parameter %s differs from reference. "
+                            "Expected: %s, Got: %s",
+                            key,
+                            ref_value,
+                            value
+                        )
+                        valid = False
         return valid
     
     def checkpoint_path_args(self):
