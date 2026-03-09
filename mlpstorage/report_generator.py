@@ -32,7 +32,7 @@ class Result:
     multi: bool
     benchmark_type: BENCHMARK_TYPES
     benchmark_command: str
-    benchmark_model: Union[LLM_MODELS, MODELS, str]
+    benchmark_model: Literal[LLM_MODELS, MODELS, str]
     benchmark_run: Union[BenchmarkRun, List[BenchmarkRun]]
     issues: List[Issue]
     category: PARAM_VALIDATION
