@@ -1468,6 +1468,20 @@ pytest test_kv_cache.py -k "TestModelConfig" -v
 pytest test_kv_cache.py -v -m "not skipif"
 ```
 
+### Complete Functional Test Suite
+
+The repository root contains a comprehensive bash test runner that executes all 15 test sections covering basic storage, model-specific tests, advanced features, performance profiles, multi-client tests, and more.
+
+```bash
+# Run the complete functional test suite
+./run_kv_cache_tests_all_mc.sh --cache-target /path/to/cache
+
+# Example with all options
+./run_kv_cache_tests_all_mc.sh --cache-target /tmp/kv_cache_tests --client-list c0,c1,c2 --loadenv /path/to/env.sh
+```
+
+This script runs 24+ test sections with comprehensive logging and automatic retry on success.
+
 ### Test Coverage
 
 The test suite covers 23 component categories with ~170+ individual tests:
