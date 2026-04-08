@@ -40,7 +40,59 @@ PowerRequirements:
     design_power: 700
     num_active_psus: 1
     num_passive_psus: 1
-
+# Each on-prem MLPerf submission include the nameplate / design power of the submitted System Under Test (SUT).
+# This information will complement existing measured-power methodologies and provide a uniform baseline reference across systems and vendors.
+# The intent is not to replace measured power but to give additional visibility into the designed power capacity of submitted systems.
+# By including design power, MLPerf can help stakeholders—submitters, reviewers, and end users—better contextualize energy efficiency results,
+# improve reproducibility, and align with related MLCommons initiatives such as Storage and Training benchmarks that already collect rated
+# power information.We propose to include the following:
+# Option 1 (Preferred): Submit the aggregate nameplate / design power for the SUT, listing all major components (accelerators, CPUs, storage, networking, etc.).
+# Option 2: Provide per-component TDP/TGP data and a summarized total for the SUT.
+# === Reporting YAML FormatThe reported design power (total of all needed PSU capacities in watts) will appear alongside the measured-power and non-power views,
+# clearly labeled as “Design Power.”This data is reported through a yaml file.
+# The structure of the YAML file is a hierarchy of components, with the power capacity based on the DMTF RedFish PowerSupply schema.
+# For example, a simple single-device system can have a single level:
+# 
+# My Device:
+# - Description: 'Optional Description'
+#   Min PSUs Needed: 1
+#   PSUs:
+#     - Name: PSU 1
+#       PowerCapacityWatts: 1200
+#     - Name: PSU 2
+#       PowerCapacityWatts: 1200
+#
+# A more complex system can have two (or more) levels:
+# My System:
+# - My Rack 1:
+#   - My Server 1:
+#     - Description: 'Optional Description'
+#       Min PSUs Needed: 1
+#       PSUs:
+#       - Name: PSU 1
+#         PowerCapacityWatts: 1200
+#       - Name: PSU 2
+#         PowerCapacityWatts: 1200
+#   - My Switch 1:
+#     - Description: 'Optional Description'
+#       Min PSUs needed: 1
+#       PSUs:
+#       - Name: PSU 1
+#         PowerCapacityWatts: 1200
+#       - Name: PSU 2
+#         PowerCapacityWatts: 1200
+# 
+# The labels “My System”, “My Rack 1”, “My Server 1”, etc. are submitter-defined labels corresponding to their system topology.
+# Rack-level systems are also supported:
+# My System:
+# - My Rack 1:
+#   - Description: 'Optional Description'
+#     Min PSUs Needed: 1
+#     PSUs:
+#     - Name: PSU 1
+#       PowerCapacityWatts: 12000
+#     - Name: PSU 2
+#       PowerCapacityWatts: 12000
 
 # All nodes used need to be listed. Clients, Data storage, metadata, front-end, back-end, etc
 Nodes:
