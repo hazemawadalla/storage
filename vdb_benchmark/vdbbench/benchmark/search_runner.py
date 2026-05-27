@@ -292,15 +292,18 @@ class SearchRunner:
             k, self.batch_size, f"{self.log_interval:,}",
         )
 
-        all_latencies: list[float] = []
+        batch_latencies: list[float] = []
         all_predicted: list[np.ndarray] = []
         all_truth: list[np.ndarray] = []
         intervals: list[IntervalStats] = []
+        total_per_query_ms: float = 0.0
+        total_batches: int = 0
 
         # Latencies for the current logging interval
         interval_latencies: list[float] = []
         interval_predicted: list[np.ndarray] = []
         interval_truth: list[np.ndarray] = []
+        interval_query_count: int = 0
         interval_idx = 0
 
         total_queries = 0
@@ -332,12 +335,13 @@ class SearchRunner:
                 elapsed_ms = (time.perf_counter() - t0) * 1000.0
 
                 batch_n = batch_end - batch_start
-                per_query_ms = elapsed_ms / batch_n
+                mean_per_query_ms = elapsed_ms / batch_n
 
-                # Record per-query latency
-                for _ in range(batch_n):
-                    all_latencies.append(per_query_ms)
-                    interval_latencies.append(per_query_ms)
+                # Record batch latency (one entry per batch, not per query)
+                batch_latencies.append(elapsed_ms)
+                interval_latencies.append(elapsed_ms)
+                total_per_query_ms += mean_per_query_ms
+                total_batches += 1
 
                 predicted_arr = np.array(result_ids, dtype=np.int64)
                 all_predicted.append(predicted_arr)
@@ -346,6 +350,7 @@ class SearchRunner:
                 interval_truth.append(batch_truth)
 
                 total_queries += batch_n
+                interval_query_count += batch_n
 
                 # Check if we should log an interval
                 if total_queries >= (interval_idx + 1) * self.log_interval:
@@ -357,6 +362,7 @@ class SearchRunner:
                         interval_latencies=interval_latencies,
                         interval_predicted=interval_predicted,
                         interval_truth=interval_truth,
+                        interval_query_count=interval_query_count,
                     )
                     intervals.append(stats)
                     self._log_stats(stats)
@@ -365,13 +371,14 @@ class SearchRunner:
                     interval_latencies = []
                     interval_predicted = []
                     interval_truth = []
+                    interval_query_count = 0
                     interval_start = time.time()
                     interval_idx += 1
 
         wall_elapsed = time.time() - wall_start
 
-        # Final stats across all queries
-        lat_arr = np.array(all_latencies)
+        # Final stats across all batches (batch latency percentiles)
+        lat_arr = np.array(batch_latencies)
         pred_all = np.concatenate(all_predicted, axis=0)
         truth_all = np.concatenate(all_truth, axis=0)
         recall = _recall_at_k(pred_all, truth_all, k)
@@ -386,15 +393,15 @@ class SearchRunner:
             latency_p50_ms=float(np.percentile(lat_arr, 50)),
             latency_p90_ms=float(np.percentile(lat_arr, 90)),
             latency_p99_ms=float(np.percentile(lat_arr, 99)),
-            latency_mean_ms=float(np.mean(lat_arr)),
+            latency_mean_ms=total_per_query_ms / total_batches if total_batches > 0 else 0.0,
             intervals=[asdict(s) for s in intervals],
         )
 
         logger.info(
             "Search benchmark complete: %s queries in %.2f s "
-            "(%.1f QPS, recall@%d=%.4f)",
+            "(%.1f QPS, recall@%d=%.4f, batch latency P50=%.2fms P99=%.2fms)",
             f"{total_queries:,}", wall_elapsed, self.result.qps,
-            k, recall,
+            k, recall, self.result.latency_p50_ms, self.result.latency_p99_ms,
         )
         return self.result
 
@@ -422,16 +429,19 @@ class SearchRunner:
         interval_latencies: list[float],
         interval_predicted: list[np.ndarray],
         interval_truth: list[np.ndarray],
+        interval_query_count: int = 0,
     ) -> IntervalStats:
         now = time.time()
         wall_elapsed = now - wall_start
         interval_elapsed = now - interval_start
 
+        # interval_latencies contains one batch latency per batch (not per query)
         lat_arr = np.array(interval_latencies)
         pred = np.concatenate(interval_predicted, axis=0)
         truth = np.concatenate(interval_truth, axis=0)
         recall = _recall_at_k(pred, truth, self.search_k)
-        iq = len(interval_latencies)
+        # Use actual query count for QPS; fall back to batch count if not provided
+        iq = interval_query_count if interval_query_count > 0 else len(interval_latencies)
 
         return IntervalStats(
             interval_index=interval_idx,
