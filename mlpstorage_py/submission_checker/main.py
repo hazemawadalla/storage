@@ -84,7 +84,19 @@ def main():
     # "match all" default). The previous str(None).split(",") produced ["None"]
     # which silently filtered out every real submitter, leaving the loader loop
     # empty — a pre-existing bug surfaced by the Phase-3 Definition-of-Done test.
-    submitters = args.submitters.split(",") if args.submitters else None
+    #
+    # Per WR-06 + WR-07 (review 2026-06-10): strip whitespace from each CSV
+    # token and drop empty-after-strip entries. `--submitters "Acme, BetaCo"`
+    # previously produced `["Acme", " BetaCo"]` and the leading space silently
+    # filtered out BetaCo. Likewise `--submitters ""` and `--submitters " "`
+    # now route to None (match-all) consistently rather than producing `[""]`
+    # which `Config.check_submitter` would reject for every submitter.
+    if args.submitters:
+        submitters = [s.strip() for s in args.submitters.split(",") if s.strip()]
+        if not submitters:
+            submitters = None
+    else:
+        submitters = None
     config = Config(
         version=args.version,
         submitters=submitters,
