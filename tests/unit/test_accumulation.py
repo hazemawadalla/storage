@@ -154,22 +154,24 @@ def make_checkpointing_run(
 def make_vectordb_run(
     results_dir: Path,
     *,
+    engine: str = "milvus",
     run_datetime: str = "20250111_160000",
     command: str = "run",
     include_summary: bool = True,
 ) -> Path:
-    """Create one vectordb run at results_dir/vector_database/<command>/<datetime>/.
+    """Create one vectordb run at
+    results_dir/vector_database/<engine>/<command>/<datetime>/.
 
-    The current path layout has no engine/backend component — this is what
-    PR 3 will add. Builder mirrors current production behavior so tests
-    document the limitation.
+    The engine is recorded as model in metadata (matches how
+    VectorDBBenchmark.__init__ mirrors args.vdb_engine into args.model so
+    grouping by (model, accelerator) treats engines as distinct workloads).
     """
-    run_dir = results_dir / "vector_database" / command / run_datetime
+    run_dir = results_dir / "vector_database" / engine / command / run_datetime
     return _write_run(
         run_dir,
         benchmark_type="vector_database",
         run_datetime=run_datetime,
-        model=None,
+        model=engine,
         accelerator=None,
         command=command,
         parameters={"workload": "vdb"},
@@ -388,26 +390,68 @@ class TestWorkloadSeparation:
 # ---------------------------------------------------------------------------
 
 
-class TestPreviewBenchmarkAccumulationLimitation:
-    """Locks down the current (buggy) behavior so PR 3/4 changes are visible."""
+class TestPreviewBenchmarkAccumulation:
+    """Accumulation behavior for preview benchmarks (vectordb, kvcache).
 
-    def test_vectordb_runs_have_no_model(self, tmp_path, mock_logger):
-        """Two vectordb runs are discovered, but both have model=None — there is
-        no way today to distinguish e.g. milvus from elasticsearch results.
-        PR 3 will add an engine component to both the path and the metadata."""
+    VectorDB now (PR 3) records an engine in the path and metadata; kvcache
+    still lacks a model component (PR 4)."""
+
+    def test_vectordb_path_includes_engine(self, tmp_path):
+        """generate_output_location produces vector_database/<engine>/<command>/<datetime>/."""
+        from types import SimpleNamespace
+
+        from mlpstorage_py.config import BENCHMARK_TYPES as _BT
+        from mlpstorage_py.rules.utils import generate_output_location
+
+        fake_benchmark = SimpleNamespace(
+            BENCHMARK_TYPE=_BT.vector_database,
+            args=SimpleNamespace(
+                results_dir=str(tmp_path),
+                command="run",
+                vdb_engine="milvus",
+            ),
+        )
+        location = generate_output_location(fake_benchmark, datetime_str="20250111_160000")
+        assert location == str(
+            tmp_path / "vector_database" / "milvus" / "run" / "20250111_160000"
+        )
+
+    def test_vectordb_path_requires_engine(self, tmp_path):
+        """Without vdb_engine, generate_output_location refuses to build a path."""
+        from types import SimpleNamespace
+
+        from mlpstorage_py.config import BENCHMARK_TYPES as _BT
+        from mlpstorage_py.rules.utils import generate_output_location
+
+        fake_benchmark = SimpleNamespace(
+            BENCHMARK_TYPE=_BT.vector_database,
+            args=SimpleNamespace(
+                results_dir=str(tmp_path),
+                command="run",
+                # no vdb_engine
+            ),
+        )
+        with pytest.raises(ValueError, match="VectorDB engine is required"):
+            generate_output_location(fake_benchmark, datetime_str="20250111_160000")
+
+    def test_vectordb_runs_distinguished_by_engine(self, tmp_path, mock_logger):
+        """Two vectordb engines accumulate in one results-dir without collision.
+        Each run's metadata records the engine in the model slot so workload
+        grouping by (model, accelerator) treats them as distinct workloads."""
         results_dir = tmp_path / "results"
-        make_vectordb_run(results_dir, run_datetime="20250111_160000")
-        make_vectordb_run(results_dir, run_datetime="20250111_160100")
+        make_vectordb_run(results_dir, engine="milvus", run_datetime="20250111_160000")
+        make_vectordb_run(results_dir, engine="milvus", run_datetime="20250111_160100")
+        # A hypothetical future engine in the same tree.
+        make_vectordb_run(results_dir, engine="elasticsearch", run_datetime="20250111_160200")
 
         runs = get_runs_files(str(results_dir), logger=mock_logger)
 
-        assert len(runs) == 2
-        assert all(r.model is None for r in runs), (
-            "Current behavior: vectordb runs lack model — fix in PR 3."
-        )
+        assert len(runs) == 3
+        engines = sorted(r.model for r in runs)
+        assert engines == ["elasticsearch", "milvus", "milvus"]
 
     def test_kvcache_runs_have_no_model(self, tmp_path, mock_logger):
-        """Same shape as the vectordb limitation. PR 4 adds model to kvcache."""
+        """Same shape as the prior vectordb limitation. PR 4 adds model to kvcache."""
         results_dir = tmp_path / "results"
         make_kvcache_run(results_dir, run_datetime="20250111_170000")
         make_kvcache_run(results_dir, run_datetime="20250111_170100")

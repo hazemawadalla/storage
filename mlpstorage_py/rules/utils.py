@@ -162,7 +162,14 @@ def generate_output_location(benchmark, datetime_str=None, **kwargs) -> str:
         output_location = os.path.join(output_location, datetime_str)
 
     elif benchmark.BENCHMARK_TYPE == BENCHMARK_TYPES.vector_database:
+        engine = getattr(benchmark.args, "vdb_engine", None)
+        if not engine:
+            raise ValueError(
+                "VectorDB engine is required for output location "
+                "(set --vdb-engine on the CLI)."
+            )
         output_location = os.path.join(output_location, benchmark.BENCHMARK_TYPE.name)
+        output_location = os.path.join(output_location, engine)
         output_location = os.path.join(output_location, benchmark.args.command)
         output_location = os.path.join(output_location, datetime_str)
 
