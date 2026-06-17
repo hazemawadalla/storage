@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mlpstorage"
-version = "3.0.9"
+version = "3.0.12"
 description = "MLPerf Storage Benchmark Suite"
 readme = "README.md"
 license = {text = "Apache-2.0"}
@@ -88,11 +88,12 @@ mlpstorage = 'mlpstorage_py.main:main'
 testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_functions = ["test_*"]
-addopts = "-v --tb=short --setup-show"
+addopts = "-v --tb=short --setup-show -m 'not slow'"
 filterwarnings = [
     "ignore::DeprecationWarning",
 ]
 markers = [
+    "slow: tests that invoke the real mlpstorage CLI / MPI and take >10s. Excluded from the default suite; opt in with `pytest -m slow` (or `pytest -m ''` to run everything).",
     "integration: subprocess + end-to-end tests (Phase 3 DoD per CONTEXT.md D-E1)",
 ]
 
