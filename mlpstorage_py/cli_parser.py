@@ -26,6 +26,7 @@ from mlpstorage_py.cli import (
     add_reports_arguments,
     add_history_arguments,
     add_lockfile_arguments,
+    add_init_arguments,
     add_version_arguments,
     add_validate_arguments,
     add_rules_coverage_arguments,
@@ -134,6 +135,11 @@ def parse_arguments():
     reports_parser = top.add_parser("reports", help="Generate a report from benchmark results")
     history_parser = top.add_parser("history", help="Display benchmark history")
     lockfile_parser = top.add_parser("lockfile", help="Generate and verify package lockfiles")
+    init_parser = top.add_parser(
+        "init",
+        description="Initialize a results-dir with the mlperf-results.yaml sentinel",
+        help="Pin orgname to a results-dir",
+    )
     version_parser = top.add_parser("version", description="Print the mlpstorage package version", help="Show installed package version and exit")
     validate_parser = top.add_parser(
         "validate",
@@ -148,6 +154,7 @@ def parse_arguments():
     add_reports_arguments(reports_parser)
     add_history_arguments(history_parser)
     add_lockfile_arguments(lockfile_parser)
+    add_init_arguments(init_parser)
     add_version_arguments(version_parser)
     add_validate_arguments(validate_parser)
     add_rules_coverage_arguments(rules_coverage_parser)

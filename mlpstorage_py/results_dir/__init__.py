@@ -76,6 +76,14 @@ try:  # pragma: no cover — bootstrap-only fallback path
 except ImportError:  # pragma: no cover
     pass
 
+# --- Init dispatcher -------------------------------------------------------- #
+# Re-exported so downstream callers (and tests) can `from
+# mlpstorage_py.results_dir import run_init` without knowing the module layout.
+try:  # pragma: no cover — bootstrap-only fallback path
+    from mlpstorage_py.results_dir.init import run_init  # noqa: E402
+except ImportError:  # pragma: no cover
+    pass
+
 __all__ = [
     "MLPERF_RESULTS_FILENAME",
     "MLPERF_RESULTS_VERSION",
@@ -85,6 +93,7 @@ __all__ = [
     "write_sentinel",
     "read_sentinel",
     "resolve_orgname",
+    "run_init",
     "ResultsDirNotInitializedError",
     "DoubleInitError",
     "NonEmptyDirError",

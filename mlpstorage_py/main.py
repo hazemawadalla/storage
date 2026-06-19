@@ -273,6 +273,13 @@ def _main_impl():
 
     args = parse_arguments()
 
+    # `init` is a filesystem-local utility that must NOT flow through
+    # update_args / validate_benchmark_environment / run_benchmark
+    # (RESEARCH.md Pitfall 3). Early-return BEFORE any benchmark plumbing.
+    if args.mode == "init":
+        from mlpstorage_py.results_dir.init import run_init
+        return run_init(args)
+
     if args.mode == "version":
         from mlpstorage_py import VERSION
         print(VERSION)
