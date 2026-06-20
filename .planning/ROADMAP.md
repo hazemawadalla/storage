@@ -14,7 +14,7 @@ This milestone delivers auto-population of the `clients[]` section of `systemnam
 Decimal phases appear between their surrounding integers in numeric order.
 
 - [x] **Phase 1: Canonical Layout & Init** — Add `mlpstorage init <orgname> <path>` plus the `mlperf-results.yaml` sentinel; refactor `generate_output_location()` to emit the Rules.md §2.1-shaped tree; add `--systemname` CLI flag + `MLPERF_SYSTEMNAME` env-var default; update affected tests. (Completed 2026-06-19 — LAY-01..LAY-08 all green.)
-- [ ] **Phase 2: First-Run Write of Partial systemname.yaml** — On first `run`, write a quantity-grouped `systemname.yaml` containing CPU, memory, and OS for every client; leave non-derivable fields blank; no-op if the file already exists.
+- [x] **Phase 2: First-Run Write of Partial systemname.yaml** — On first `run`, write a quantity-grouped `systemname.yaml` containing CPU, memory, and OS for every client; leave non-derivable fields blank; no-op if the file already exists. (Completed 2026-06-19 — LIFE-01, SER-01..03, COLL-01..02 all green; 257-test verification suite passes.)
 - [ ] **Phase 3: Chassis Model + Networking Coverage** — Extend the auto-filled YAML with DMI chassis `model_name` and a `networking[]` block sourced from sysfs.
 - [ ] **Phase 4: Sysctl, Environment, and Drives Coverage** — Extend the auto-filled YAML with curated sysctl snapshot, redacted environment variables, and `lsblk`-sourced drive entries.
 - [ ] **Phase 5: Logical Diff Lifecycle + Capacity Gate** — On re-runs, diff the in-memory image against the on-disk YAML for collector-owned fields and fail on drift; preserve user-filled blanks when unchanged; refuse to start `datagen` if the dataset destination directory lacks free space.
@@ -69,7 +69,7 @@ Decimal phases appear between their surrounding integers in numeric order.
   6. The `datagen` command does NOT touch the systemname.yaml — neither writes nor diffs (datagen client fleet may legitimately differ from the run fleet).
   7. Per the universal collection-failure rule, any unreadable source (e.g., the test environment's `/proc/cpuinfo` is mocked to return a parse error) yields empty strings for the affected fields; `datagen` / `run` still completes.
 
-**Plans:** 4/5 plans complete
+**Plans:** 5/5 plans complete
 **Wave 1**
 
 - [x] 02-01-PLAN.md — Slice 1: HostCPUInfo.num_sockets data-model extension (D-16; COLL-01 prep)
@@ -88,7 +88,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 
 **Wave 5** *(blocked on Wave 4)*
 
-- [ ] 02-05-PLAN.md — Slice 5: Benchmark.run() hook + integration tests + kvcache/vectordb regression (LIFE-01 end-to-end)
+- [x] 02-05-PLAN.md — Slice 5: Benchmark.run() hook + integration tests + kvcache/vectordb regression (LIFE-01 end-to-end)
 
 ### Phase 3: Chassis Model + Networking Coverage
 
