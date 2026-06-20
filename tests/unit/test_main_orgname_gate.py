@@ -426,3 +426,82 @@ def test_benchmark_init_raises_when_orgname_missing():
     assert "orgname" in str(excinfo.value).lower(), (
         f"Expected orgname-related error; got: {excinfo.value!r}"
     )
+
+
+# ---------------------------------------------------------------------------- #
+# WR-03 — history-rerun must re-dispatch when the replayed mode lands in       #
+# a NON_BENCHMARK_NO_ORGNAME bypass mode (version / lockfile / rules-coverage).#
+# ---------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize("replayed_mode", ["version", "lockfile", "rules-coverage"])
+def test_history_rerun_redispatches_bypass_mode(replayed_mode, tmp_path):
+    """WR-03: a history rerun whose replayed entry is a bypass mode must
+    re-route to that mode's handler — not fall through to the benchmark loop.
+
+    Pre-fix, after ``args = new_args`` the only mode the code re-checked
+    was ``reports``. A replayed ``version``/``lockfile``/``rules-coverage``
+    entry fell straight into ``update_args`` + ``run_benchmark``, which
+    either crashed in obvious ways (no ``benchmark`` attribute) or — worse
+    — silently re-entered benchmark plumbing with a non-benchmark mode.
+    The fix re-dispatches after ``args = new_args`` so the replayed
+    bypass mode is honored.
+    """
+    from mlpstorage_py import main as main_mod
+    from mlpstorage_py.config import EXIT_CODE
+
+    # Initial argv: history rerun with --results-dir (orgname gate fires
+    # only on the original args, which is fine — history is not bypassed).
+    init_dir = _init_results_dir(tmp_path)
+    argv = [
+        "mlpstorage", "history", "rerun", "1",
+        "--results-dir", init_dir,
+        "--systemname", "sys-v1",
+    ]
+
+    # Build a replayed Namespace that lands in the requested bypass mode.
+    # Keep the attributes minimal — only ``mode`` and the bare-minimum
+    # things that ``_main_impl`` looks at on the post-history path.
+    from argparse import Namespace as _NS
+    replayed = _NS(
+        mode=replayed_mode,
+        debug=False,
+        verbose=False,
+        stream_log_level="INFO",
+        quiet=False,
+        # Most bypass modes don't carry --results-dir, but the orgname gate
+        # has already run on the ORIGINAL args before we reach history; the
+        # replayed mode being in NON_BENCHMARK_NO_ORGNAME_MODES is what
+        # signals "do not gate again".
+        results_dir=init_dir,
+    )
+
+    with patch.object(main_mod, "update_args") as mock_update_args, \
+         patch.object(main_mod, "run_benchmark") as mock_run_benchmark, \
+         patch("mlpstorage_py.run_summary.print_run_summary") as mock_print_summary, \
+         patch("mlpstorage_py.history.HistoryTracker.handle_history_command",
+               return_value=replayed), \
+         patch("sys.argv", argv):
+        # We don't care if the actual bypass handler runs end-to-end here —
+        # we only care that the benchmark loop is NOT invoked on a replayed
+        # non-benchmark mode. Patch the lockfile/version/rules-coverage
+        # handlers so they no-op if reached.
+        with patch.object(main_mod, "handle_lockfile_command",
+                          return_value=EXIT_CODE.SUCCESS), \
+             patch("mlpstorage_py.submission_checker.tools.rules_coverage.run",
+                   return_value=EXIT_CODE.SUCCESS, create=True):
+            try:
+                main_mod._main_impl()
+            except SystemExit:
+                # ``version`` calls ``sys.exit(0)`` — accept that as success.
+                pass
+            except Exception:
+                # The exact handler may not be wired in the test fixture;
+                # the WR-03 contract is purely about NOT touching
+                # update_args/run_benchmark/print_run_summary on a replayed
+                # bypass mode.
+                pass
+
+    mock_update_args.assert_not_called()
+    mock_run_benchmark.assert_not_called()
+    mock_print_summary.assert_not_called()
