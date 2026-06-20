@@ -429,6 +429,45 @@ def test_benchmark_init_raises_when_orgname_missing():
 
 
 # ---------------------------------------------------------------------------- #
+# WR-06 — defense-in-depth orgname re-validation at the gate                   #
+# ---------------------------------------------------------------------------- #
+
+
+def test_gate_rejects_orgname_with_unsafe_characters(tmp_path):
+    """WR-06: the gate must re-validate ``args.orgname`` against the canonical
+    character class even after ``resolve_orgname`` returns.
+
+    Pydantic v2's full-match regex makes this defensive, but the value
+    immediately lands in ``os.path.join(..., orgname, "results", ...)`` —
+    so a Pydantic regression (version bump to non-anchored semantics,
+    switch to v1 ``regex=`` keyword, etc.) would create a directory-
+    traversal vector. Patch ``resolve_orgname`` to return an unsafe value
+    and assert the gate refuses it with ``ConfigurationError``.
+    """
+    from mlpstorage_py import main as main_mod
+    from mlpstorage_py.errors import ConfigurationError
+
+    init_dir = _init_results_dir(tmp_path)
+    argv = _datagen_argv(init_dir)
+
+    # Simulate a Pydantic-validation bypass / regression by short-circuiting
+    # resolve_orgname directly. The full-stack Pydantic path is exercised
+    # elsewhere; this test pins the gate's belt-and-suspenders check.
+    with patch("mlpstorage_py.main.resolve_orgname", return_value="evil/../traversal"), \
+         patch.object(main_mod, "update_args"), \
+         patch.object(main_mod, "run_benchmark"), \
+         patch("sys.argv", argv):
+        with pytest.raises(ConfigurationError) as excinfo:
+            main_mod._main_impl()
+
+    msg = str(excinfo.value)
+    assert "orgname" in msg.lower()
+    assert "invalid" in msg.lower() or "character" in msg.lower(), (
+        f"Expected message to flag invalid characters; got: {msg!r}"
+    )
+
+
+# ---------------------------------------------------------------------------- #
 # WR-03 — history-rerun must re-dispatch when the replayed mode lands in       #
 # a NON_BENCHMARK_NO_ORGNAME bypass mode (version / lockfile / rules-coverage).#
 # ---------------------------------------------------------------------------- #

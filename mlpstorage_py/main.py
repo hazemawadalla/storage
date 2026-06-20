@@ -9,6 +9,7 @@ messaging.
 """
 
 import os
+import re
 import signal
 import sys
 import traceback
@@ -350,6 +351,29 @@ def _main_impl():
                     suggestion=f"Run `mlpstorage init <orgname> {results_dir_value}` first.",
                     code=ErrorCode.CONFIG_MISSING_REQUIRED,
                 ) from e
+            # WR-06: defense-in-depth re-validation at the gate. The schema
+            # (Pydantic v2) already full-match-validates the sentinel's
+            # ``orgname`` against ``[A-Za-z0-9._-]+`` on read, so a properly-
+            # written sentinel cannot reach here with a path separator or
+            # other unsafe character. But ``args.orgname`` lands in
+            # ``os.path.join(..., orgname, "results", ...)`` immediately
+            # downstream, so we want a paranoid post-resolution assertion
+            # that catches:
+            #   * a future Pydantic-version bump that regresses to
+            #     non-anchored regex semantics,
+            #   * a switch to v1's ``regex=`` keyword (which used different
+            #     match semantics),
+            #   * any unit-test path that constructs args.orgname directly
+            #     without going through ``read_sentinel``.
+            if not re.fullmatch(r"[A-Za-z0-9._-]+", args.orgname):
+                raise ConfigurationError(
+                    f"sentinel orgname {args.orgname!r} contains invalid characters",
+                    suggestion=(
+                        "Re-initialize the results-dir with a clean orgname "
+                        "(matches [A-Za-z0-9._-]+)."
+                    ),
+                    code=ErrorCode.CONFIG_INVALID_VALUE,
+                )
 
     # Handle history command separately (now AFTER the gate so it inherits
     # a resolved args.orgname when --results-dir is supplied; D-12).
