@@ -334,6 +334,31 @@ def test_init_refuses_non_empty_dir(tmp_path):
     assert "non-empty" in str(excinfo.value).lower()
 
 
+def test_init_non_empty_error_lists_offending_files(tmp_path):
+    """WR-08: NonEmptyDirError message names the entries that blocked init.
+
+    Pre-fix the message just said "non-empty and not initialized" — the
+    operator then had to run ``ls -la`` to discover (often) a single
+    ``.gitkeep`` or ``.DS_Store`` was the blocker. Surface up to five
+    entries so the user can debug in place.
+    """
+    from mlpstorage_py.results_dir.errors import NonEmptyDirError
+    from mlpstorage_py.results_dir.init import run_init
+
+    target = tmp_path / "r1"
+    target.mkdir()
+    (target / ".gitkeep").write_text("")
+    (target / "stray.log").write_text("noise\n")
+
+    with pytest.raises(NonEmptyDirError) as excinfo:
+        run_init(argparse.Namespace(mode="init", orgname="Acme", path=str(target)))
+
+    msg = str(excinfo.value)
+    # Both blocking entries should be named in the message.
+    assert ".gitkeep" in msg
+    assert "stray.log" in msg
+
+
 def test_init_refuses_when_target_is_a_regular_file(tmp_path):
     """WR-02: target exists as a regular file (not a directory) → friendly error.
 

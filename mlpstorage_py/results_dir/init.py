@@ -131,15 +131,20 @@ def run_init(args) -> EXIT_CODE:
         )
 
     # ── 3. LAY-01 — target exists, has files, no sentinel: refuse ──────────
-    # ``os.scandir`` + ``any(...)`` is the canonical idiom for "directory is
-    # non-empty?" — single syscall under the hood, no manual list build, no
-    # off-by-one against hidden files (RESEARCH.md "Don't Hand-Roll" row).
+    # ``os.scandir`` enumerates every entry, including hidden ones (``.git``,
+    # ``.gitkeep``, ``.DS_Store``, etc.). LAY-01 treats ANY entry as
+    # blocking, but we surface the first few names so the user does not have
+    # to run ``ls -la`` to figure out what is in the way (WR-08).
     if os.path.isdir(target):
         with os.scandir(target) as it:
-            non_empty = any(True for _ in it)
-        if non_empty:
+            names = sorted(e.name for e in it)
+        if names:
+            preview = ", ".join(names[:5])
+            if len(names) > 5:
+                preview = f"{preview}, ..."
             raise NonEmptyDirError(
-                f"results-dir {target!r} is non-empty and not initialized.",
+                f"results-dir {target!r} is non-empty and not initialized "
+                f"(found: {preview}).",
                 suggestion=(
                     "Choose an empty path, or remove the existing contents "
                     "before running `mlpstorage init`."
