@@ -426,3 +426,159 @@ def test_heterogeneous_fleet_produces_multiple_stanzas(tmp_path):
     assert sum(c['quantity'] for c in clients) == 3
     # D-7 sort: largest quantity first.
     assert clients[0]['quantity'] >= clients[1]['quantity']
+
+
+# ---------------------------------------------------------------------------
+# CR-01 regression — production single-node-fallback path
+#
+# The 12 tests above all go through `_make_benchmark`, which installs a
+# `_collect_cluster_start` mock that seeds `self._cluster_info_start` BEFORE
+# the Phase 2 write hook reads it at base.py:991. That masking pattern hides
+# the production crash documented in `02-VERIFICATION.md` (status=gaps_found)
+# and independently confirmed as CR-01 BLOCKER in `02-REVIEW.md`:
+#
+#   - `Benchmark.__init__` never initializes `self._cluster_info_start`.
+#   - `_collect_cluster_start()` has an early-return branch at base.py:634-636
+#     that fires on (a) `datagen`/`configview` commands and (b) any benchmark
+#     whose `--hosts` default is None (e.g. VectorDB at cli/vectordb_args.py:107).
+#   - On the early-return path, `_cluster_info_start` is never assigned, and
+#     the write hook at base.py:991 raises AttributeError when it reads it.
+#   - The catch-all `except Exception` at base.py:997 relabels the error as
+#     "Failed to write systemname.yaml: ..." and re-raises — aborting the
+#     benchmark BEFORE DLIO launches. (This is a regression from Phase 1:
+#     production `datagen` used to complete normally.)
+#
+# These two regression tests construct a `VectorDBBenchmark` WITHOUT the
+# `_collect_cluster_start` mock that `_make_benchmark` installs, so the real
+# `_collect_cluster_start` runs and hits the early-return path. Both
+# subcases (datagen and run-with-no-hosts) MUST run without AttributeError
+# after the init-side fix in `Benchmark.__init__` lands.
+# ---------------------------------------------------------------------------
+
+
+def _make_benchmark_no_cluster_mock(tmp_path, *, command='run', mode='closed',
+                                    orgname='Acme', systemname='sys-v1'):
+    """Construct VectorDBBenchmark WITHOUT mocking `_collect_cluster_start`.
+
+    This is the production-path harness that exposes CR-01. Everything else
+    that `_make_benchmark` mocks is still mocked here (validate_environment,
+    timeseries, cluster_end, write_timeseries_data, _run) — only the
+    cluster-start mock is omitted so the real early-return path executes.
+    """
+    args = _vdb_args(tmp_path, command=command, mode=mode,
+                     orgname=orgname, systemname=systemname)
+    output_dir = str(tmp_path / f"output_{_RUN_DATETIME_COUNTER[0]}")
+    with patch('mlpstorage_py.benchmarks.base.generate_output_location') as mock_gen, \
+         patch('mlpstorage_py.benchmarks.vectordbbench.read_config_from_file', return_value={}), \
+         patch('mlpstorage_py.benchmarks.vectordbbench.VectorDBBenchmark.verify_benchmark'), \
+         patch('mlpstorage_py.benchmarks.vectordbbench.VectorDBBenchmark._validate_vdb_dependencies'):
+        mock_gen.return_value = output_dir
+        from mlpstorage_py.benchmarks.vectordbbench import VectorDBBenchmark
+        bm = VectorDBBenchmark(args, run_datetime=_unique_run_datetime())
+
+    # Mock everything EXCEPT _collect_cluster_start — the whole point of this
+    # harness is to let the real early-return execute and trigger CR-01.
+    bm._validate_environment = MagicMock()
+    bm._start_timeseries_collection = MagicMock()
+    bm._stop_timeseries_collection = MagicMock()
+    bm._collect_cluster_end = MagicMock()
+    bm.write_timeseries_data = MagicMock()
+    bm._run = MagicMock(return_value=0)
+    return bm
+
+
+def test_run_does_not_raise_when_cluster_info_start_attribute_is_uninitialized_datagen(tmp_path):
+    """CR-01 datagen-subcase: `command='datagen'` hits `_collect_cluster_start`
+    early-return at base.py:634-636 (datagen short-circuit in
+    `_should_collect_cluster_info`). The write hook at base.py:991 then reads
+    `self._cluster_info_start`. Before the fix this raises AttributeError;
+    after the fix the attribute is None-by-init, the writer's D-12 command
+    gate at auto_generator.py:443 fires cleanly, and no file is written.
+    """
+    bm = _make_benchmark_no_cluster_mock(tmp_path, command='datagen')
+
+    # Precautionary patch on the D-8 fallback's local-collection call.
+    # For datagen this path is unreachable (D-12 gate fires first), but the
+    # patch keeps the test hermetic against any future change that lets it
+    # run on this subcase.
+    with patch(
+        'mlpstorage_py.system_description.auto_generator.collect_local_system_info',
+        return_value={'meminfo': {'MemTotal': 0}, 'cpuinfo': '', 'os_release': {}},
+    ):
+        # PRIMARY ASSERTION (RED before fix, GREEN after):
+        # Pre-fix, base.py:991 reads `self._cluster_info_start` after the
+        # early-return at base.py:634-636 left it unset → AttributeError,
+        # relabeled by the catch-all at base.py:997 as
+        # "Failed to write systemname.yaml: ...". Post-fix, the init-side
+        # default makes the read succeed, D-12 gates the write off cleanly,
+        # and run() returns 0.
+        rc = bm.run()
+
+    assert rc == 0
+    # Post-fix lock: the attribute is present (init-side fix) and None.
+    assert hasattr(bm, '_cluster_info_start')
+    assert bm._cluster_info_start is None
+    # D-12 datagen-no-write contract: no file at canonical D-11 path.
+    assert not _yaml_path(tmp_path, mode='closed', orgname='Acme',
+                          systemname='sys-v1').exists()
+    # The early-return left _cluster_info_start as the init-side default.
+    assert bm._cluster_info_start is None
+
+
+def test_run_does_not_raise_when_cluster_info_start_attribute_is_uninitialized_run(tmp_path):
+    """CR-01 run-subcase: `command='run'` with no `--hosts` (mirrors VectorDB's
+    `cli/vectordb_args.py:107` `default=None`) hits the same early-return at
+    base.py:634-636 because both `_should_collect_cluster_info()` (no hosts)
+    and `_should_use_ssh_collection()` (no hosts) return False. The write
+    hook then reads `self._cluster_info_start`. Before the fix this raises
+    AttributeError; after the fix the attribute is None-by-init, the writer's
+    D-12 gate passes (command=='run'), the D-8 fallback at
+    auto_generator.py:374-378 takes over with `cluster_info=None`, and the
+    file IS written at the canonical D-11 path via local collection.
+    """
+    bm = _make_benchmark_no_cluster_mock(tmp_path, command='run')
+
+    # D-8 fallback hermetic stub: _resolve_host_info_list(None) calls
+    # collect_local_system_info(). Feed it a minimal HostInfo-compatible
+    # dict so HostInfo.from_collected_data produces a populated host.
+    fake_local = {
+        'hostname': 'localhost',
+        'meminfo': {'MemTotal': 274_877_906_944},
+        'cpuinfo': (
+            'processor\t: 0\n'
+            'physical id\t: 0\n'
+            'model name\t: Intel(R) Xeon Platinum 8480+\n'
+            'cpu cores\t: 56\n'
+        ),
+        'os_release': {'NAME': 'Rocky Linux', 'VERSION_ID': '9.5'},
+        'cmdline': '',
+        'uname': {'machine': 'x86_64'},
+    }
+    with patch(
+        'mlpstorage_py.system_description.auto_generator.collect_local_system_info',
+        return_value=fake_local,
+    ):
+        # PRIMARY ASSERTION (RED before fix, GREEN after):
+        # Pre-fix, base.py:991 reads `self._cluster_info_start` after the
+        # early-return at base.py:634-636 left it unset → AttributeError,
+        # relabeled by the catch-all at base.py:997 as
+        # "Failed to write systemname.yaml: ...". Post-fix, the init-side
+        # default makes the read succeed, D-12 gates pass through, D-8
+        # fallback runs collect_local_system_info(), and the file lands.
+        rc = bm.run()
+
+    assert rc == 0
+    # Post-fix lock: the attribute is present (init-side fix) and None.
+    assert hasattr(bm, '_cluster_info_start')
+    assert bm._cluster_info_start is None
+    target = _yaml_path(tmp_path, mode='closed', orgname='Acme',
+                       systemname='sys-v1')
+    # D-8 fallback ran; D-12 gate passed; D-9 atomic write succeeded.
+    assert target.exists()
+    data = yaml.safe_load(target.read_text())
+    # Non-empty valid YAML, system_under_test.clients populated.
+    assert 'system_under_test' in data
+    clients = data['system_under_test']['clients']
+    assert isinstance(clients, list)
+    assert len(clients) >= 1
+    assert sum(c.get('quantity', 0) for c in clients) >= 1
