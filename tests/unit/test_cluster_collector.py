@@ -1354,3 +1354,73 @@ class TestMPICollectorScriptMain:
         assert 'node0' in data
         assert 'node1' in data
         assert '_collection_error' in data['node1']
+
+
+class TestHostCPUInfoNumSockets:
+    """Tests for HostCPUInfo.num_sockets field and wiring (D-16, COLL-01).
+
+    Plan 02-01 adds an additive `num_sockets: int = 0` field on HostCPUInfo
+    and wires it through HostCPUInfo.from_dict and HostInfo.from_collected_data
+    so plans 02-02 / 02-03 can populate chassis.cpu_qty from host.cpu.num_sockets.
+    """
+
+    def test_host_cpu_info_carries_num_sockets(self):
+        """End-to-end: the new field exists, defaults to 0, and from_dict /
+        from_collected_data both populate it from the cpuinfo / summarize_cpuinfo
+        result. Mirrors the existing factory-roundtrip style in this file."""
+        from mlpstorage_py.rules.models import HostCPUInfo, HostInfo
+
+        # Case 1: default-zero on a no-arg construction.
+        cpu_default = HostCPUInfo()
+        assert cpu_default.num_sockets == 0
+
+        # Case 2: explicit keyword construction.
+        cpu_explicit = HostCPUInfo(num_sockets=2)
+        assert cpu_explicit.num_sockets == 2
+
+        # Case 3: from_dict reads num_sockets from the dict.
+        cpu_from_dict = HostCPUInfo.from_dict({
+            'num_cores': 4,
+            'num_logical_cores': 8,
+            'model': 'X',
+            'architecture': 'x86_64',
+            'num_sockets': 2,
+        })
+        assert cpu_from_dict.num_sockets == 2
+
+        # Case 4: from_dict defaults num_sockets to 0 when missing.
+        cpu_from_dict_default = HostCPUInfo.from_dict({})
+        assert cpu_from_dict_default.num_sockets == 0
+
+        # Case 5 (primary D-16 wiring): two-socket cpuinfo → num_sockets == 2.
+        # Build a minimal /proc/cpuinfo-shaped list with two distinct physical ids.
+        # summarize_cpuinfo counts unique 'physical id' values.
+        cpuinfo_two_sockets = [
+            {'processor': 0, 'physical id': 0, 'core id': 0,
+             'model name': 'Test CPU', 'flags': 'fpu lm'},
+            {'processor': 1, 'physical id': 0, 'core id': 1,
+             'model name': 'Test CPU', 'flags': 'fpu lm'},
+            {'processor': 2, 'physical id': 1, 'core id': 0,
+             'model name': 'Test CPU', 'flags': 'fpu lm'},
+            {'processor': 3, 'physical id': 1, 'core id': 1,
+             'model name': 'Test CPU', 'flags': 'fpu lm'},
+        ]
+        host_two = HostInfo.from_collected_data({
+            'hostname': 'h',
+            'cpuinfo': cpuinfo_two_sockets,
+        })
+        assert host_two.cpu is not None
+        assert host_two.cpu.num_sockets == 2
+
+        # Case 6 (single-socket fallback): cpuinfo with no 'physical id' keys
+        # falls through to summarize_cpuinfo's `else 1` branch.
+        cpuinfo_no_phys_id = [
+            {'processor': 0, 'model name': 'Test CPU', 'flags': 'fpu lm'},
+            {'processor': 1, 'model name': 'Test CPU', 'flags': 'fpu lm'},
+        ]
+        host_one = HostInfo.from_collected_data({
+            'hostname': 'h',
+            'cpuinfo': cpuinfo_no_phys_id,
+        })
+        assert host_one.cpu is not None
+        assert host_one.cpu.num_sockets == 1
