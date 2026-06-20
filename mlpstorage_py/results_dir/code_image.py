@@ -27,10 +27,16 @@ the captured tree matches what the submission checker re-walks.
 Security
 --------
 
-* Symlink traversal (T-1-CI2): ``shutil.copytree(symlinks=False)``. Symlinks
-  in the source tree are NOT followed; ``copytree`` will copy them as
-  symlinks themselves, preventing reads of arbitrary out-of-tree files. This
-  is the V12 ASVS mitigation registered in the threat model.
+* Symlink traversal (T-1-CI2): ``shutil.copytree(symlinks=True)``. Symlinks
+  in the source tree are NOT followed; ``copytree`` reproduces them as
+  symlinks in the destination tree, preventing reads of arbitrary out-of-tree
+  files. This is the V12 ASVS mitigation registered in the threat model.
+
+  Note on stdlib semantics (counter-intuitive): in ``shutil.copytree``,
+  ``symlinks=True`` means "symbolic links in the source tree result in
+  symbolic links in the destination tree"; ``symlinks=False`` means "the
+  contents of files pointed to by symbolic links are copied" — i.e. the
+  link IS followed. The mitigation here is therefore ``symlinks=True``.
 * Disk-fill DoS (T-1-CI1): accepted. The source path is the bounded
   ``mlpstorage_py/`` package directory; not user-controlled.
 
@@ -139,8 +145,12 @@ def capture_code_image(
     shutil.copytree(
         src,
         dst,
-        # T-1-CI2: do NOT follow symlinks during the copy.
-        symlinks=False,
+        # T-1-CI2: preserve symlinks as symlinks in the destination — do
+        # NOT follow them. ``symlinks=True`` in ``shutil.copytree`` means
+        # "reproduce the link as a link"; ``symlinks=False`` would copy
+        # the link's TARGET contents, which is exactly the V12 ASVS
+        # threat we mitigate against (out-of-tree exfiltration).
+        symlinks=True,
         ignore=shutil.ignore_patterns(*_EXCLUDE_DIRS, *_EXCLUDE_FILENAMES),
     )
     return str(dst)
