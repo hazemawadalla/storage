@@ -4,7 +4,8 @@ Covers LAY-06 (per-mode code-image capture, Rules.md §2.1.6):
 
 - ``closed`` mode: ONE image at ``<rd>/closed/<orgname>/code/``; idempotent.
 - ``open`` mode: per-(benchmark, command) image at
-  ``<rd>/open/<orgname>/code/<benchmark>/<command>/code/``.
+  ``<rd>/open/<orgname>/code/<benchmark>/<command>/``. Single ``code/``
+  segment, mirroring closed mode (WR-05 — the duplicated suffix was a typo).
 - ``whatif`` mode: returns ``None``; nothing written.
 - Unknown mode: raises ``ValueError``.
 - Excludes ``__pycache__/``, ``*.pyc``, ``tests/``, ``.pytest_cache/`` (V12).
@@ -106,8 +107,9 @@ class TestOpenMode:
         datagen_dst = capture_code_image(
             str(tmp_path), "open", "Acme", "training", "datagen",
         )
-        expected_run = tmp_path / "open" / "Acme" / "code" / "training" / "run" / "code"
-        expected_datagen = tmp_path / "open" / "Acme" / "code" / "training" / "datagen" / "code"
+        # WR-05: single ``code/`` segment — was previously ``code/.../code/``.
+        expected_run = tmp_path / "open" / "Acme" / "code" / "training" / "run"
+        expected_datagen = tmp_path / "open" / "Acme" / "code" / "training" / "datagen"
 
         assert run_dst == str(expected_run)
         assert datagen_dst == str(expected_datagen)

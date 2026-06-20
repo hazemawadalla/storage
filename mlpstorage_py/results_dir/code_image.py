@@ -12,8 +12,10 @@ Mode policy
   ``<results_dir>/closed/<orgname>/code/``. Idempotent: re-entry early-returns
   if the destination already exists.
 * **open** — ONE image per (results_dir, orgname, benchmark, command) tuple at
-  ``<results_dir>/open/<orgname>/code/<benchmark>/<command>/code/``. Open mode
+  ``<results_dir>/open/<orgname>/code/<benchmark>/<command>/``. Open mode
   permits per-command code variation, so each command keeps its own snapshot.
+  The single ``code/`` segment mirrors the closed-mode shape — the previous
+  doubled ``code/.../code/`` was a typo (WR-05).
 * **whatif** — return ``None``. No filesystem side effects.
 
 Excludes
@@ -87,7 +89,9 @@ def _destination_for(
     if mode == "closed":
         return base / "closed" / orgname / "code"
     if mode == "open":
-        return base / "open" / orgname / "code" / benchmark_type / command / "code"
+        # WR-05: single ``code/`` segment — mirrors closed mode at line above.
+        # Previous shape had a duplicated ``code/.../code/`` suffix.
+        return base / "open" / orgname / "code" / benchmark_type / command
     raise ValueError(f"Unknown mode: {mode!r}")
 
 

@@ -210,11 +210,12 @@ class TestOpenLayoutShape:
         assert run_dir == expected
         assert run_dir.is_dir()
 
-        # Open mode: image at per-(benchmark, command) tuple.
+        # Open mode: image at per-(benchmark, command) tuple. Single ``code/``
+        # segment, mirroring closed mode (WR-05).
         code_dst = capture_code_image(
             str(rd), "open", "Acme", "training", "datagen",
         )
-        expected_code = rd / "open" / "Acme" / "code" / "training" / "datagen" / "code"
+        expected_code = rd / "open" / "Acme" / "code" / "training" / "datagen"
         assert code_dst == str(expected_code)
         assert expected_code.is_dir()
 
@@ -222,7 +223,7 @@ class TestOpenLayoutShape:
         run_dst = capture_code_image(
             str(rd), "open", "Acme", "training", "run",
         )
-        expected_run_code = rd / "open" / "Acme" / "code" / "training" / "run" / "code"
+        expected_run_code = rd / "open" / "Acme" / "code" / "training" / "run"
         assert run_dst == str(expected_run_code)
         assert expected_run_code.is_dir()
 
