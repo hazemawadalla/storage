@@ -2910,6 +2910,30 @@ class TestDrivesCollector:
         out = cc.collect_drives()
         assert out == []
 
+    def test_removable_rm_bool_skipped(self, monkeypatch):
+        """D-31 rule 1 — newer util-linux JSON output (observed on the
+        WSL2 dev shell during Plan 04-03 smoke verification) emits RM as
+        a JSON boolean (`true`/`false`). The coercion must skip rows
+        where rm is Python True even though str(True) != '1'."""
+        from mlpstorage_py import cluster_collector as cc
+        payload = {
+            "blockdevices": [
+                # Surviving accepted-TRAN row: rm=False, must emit.
+                {"name": "nvme0n1", "model": "X", "vendor": "Y",
+                 "size": "500000000000", "rota": False, "tran": "nvme",
+                 "rm": False},
+                # Removable row: rm=True, must skip.
+                {"name": "sdb", "model": "USB", "vendor": "SanDisk",
+                 "size": "32000000000", "rota": False, "tran": "sata",
+                 "rm": True},
+            ]
+        }
+        monkeypatch.setattr(cc.subprocess, "run",
+                            lambda *a, **k: _lsblk_cp(payload))
+        out = cc.collect_drives()
+        assert len(out) == 1
+        assert out[0]["model_name"] == "X"
+
     def test_loop_zram_dm_prefixes_skipped(self, monkeypatch):
         """D-31 rule 2 — virtual NAME prefixes {loop, dm-, zram, ram, sr, fd}
         all dropped. One real nvme0n1 interleaved must survive."""

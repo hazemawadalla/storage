@@ -1239,6 +1239,145 @@ def collect_environment() -> List[Dict[str, str]]:
 
 
 # =============================================================================
+# Phase 4 / Plan 04-03 — Drives collector (COLL-07, D-30/31/32/33/36)
+# =============================================================================
+#
+# Invokes `lsblk -J -b -d -o NAME,MODEL,VENDOR,SIZE,ROTA,TRAN,RM` via
+# subprocess.run, JSON-parses the output, applies the D-31 four-rule filter
+# chain, and emits one `{vendor_name, model_name, interface, capacity_in_GB}`
+# dict per surviving row per D-30.
+#
+# D-2 envelope at two scopes:
+#   - Outer try/except: any subprocess failure (FileNotFoundError on busybox
+#     Alpine, TimeoutExpired on stuck I/O, SubprocessError, JSONDecodeError on
+#     stdout corruption, non-zero returncode) → return [].
+#   - Per-row try/except: a single malformed row (non-int size, missing keys)
+#     skips itself, never aborts the whole walk.
+#
+# D-33: empty output (lsblk absent OR all rows filtered) yields []; the
+# auto_generator transform layer (Plan 04-04) is responsible for omitting
+# the `drives` key from the emitted client stanza entirely.
+#
+# Pattern B (D-36): collect_drives + _LSBLK_ARGS + the three filter constants
+# are duplicated inline in MPI_COLLECTOR_SCRIPT (untyped form per Phase 3
+# convention). The parity test asserts behavioral equivalence under the same
+# monkeypatched subprocess.run.
+#
+# RESEARCH Q1 quirks honored:
+#   (a) Empty TRAN with NAME starting `nvme` is rescued to TRAN='nvme'
+#       (older kernels on some NVMe drives reported TRAN='' rather than
+#       'nvme' before kernel 5.4).
+#   (b) RM is sometimes string ('0'/'1') in util-linux <2.37 and int (0/1)
+#       in util-linux >=2.37; `str(row.get('rm', '0')) == '1'` handles both.
+#   (c) SIZE is bytes because of the -b flag; capacity_in_GB is decimal GB
+#       (// 10**9) per the nameplate-capacity convention drive specs use.
+# =============================================================================
+
+_LSBLK_ARGS: Final[Tuple[str, ...]] = (
+    'lsblk', '-J', '-b', '-d', '-o', 'NAME,MODEL,VENDOR,SIZE,ROTA,TRAN,RM',
+)
+
+_DRIVE_VIRTUAL_NAME_PREFIXES: Final[Tuple[str, ...]] = (
+    'loop', 'dm-', 'zram', 'ram', 'sr', 'fd',
+)
+
+_DRIVE_VIRTUAL_TRANS: Final[frozenset] = frozenset({'loop', 'zram'})
+
+_DRIVE_ACCEPTED_TRANS: Final[frozenset] = frozenset({'nvme', 'sata', 'sas'})
+
+
+def collect_drives() -> List[Dict[str, Any]]:
+    """Return one dict per accepted block device, with D-31 filter chain
+    applied to ``lsblk -J -b -d -o NAME,MODEL,VENDOR,SIZE,ROTA,TRAN,RM`` output.
+
+    Each surviving row emits the D-30 grouping-key shape:
+        ``{vendor_name, model_name, interface, capacity_in_GB}``
+
+    D-31 four-rule filter chain (applied per row, in order, with early continue):
+      1. RM=1 reject — string-or-int coercion via `str(row.get('rm','0'))=='1'`
+         (RESEARCH Q1 util-linux variance).
+      2. Virtual NAME prefix reject — `{loop, dm-, zram, ram, sr, fd}`.
+         Virtual TRAN reject — `{loop, zram}`.
+      3. Unknown TRAN drop — only `{nvme, sata, sas}` accepted. Exception:
+         empty TRAN with NAME starting `nvme` is rescued to `nvme` (RESEARCH
+         Q1 quirk a — older kernels report TRAN='' on some NVMe drives).
+         Note: rows with unknown TRAN (`usb`, `virtio`, `ata`, `mmc`, etc.) are
+         DROPPED, NOT mapped to `'other'`. The DriveInstance.other schema enum
+         value remains for submitter hand-fills (D-31, 04-CONTEXT §specifics).
+      4. Per-row try/except on the emit step isolates a single bad row.
+
+    D-2 envelope: lsblk binary absent (FileNotFoundError on busybox / minimal
+    Alpine), TimeoutExpired, SubprocessError, JSONDecodeError, non-zero
+    returncode → `[]`. The collector never raises.
+
+    Per D-33, an empty return (absent lsblk or all rows filtered) is the
+    universal "absent or invalid" signal the auto_generator splice layer uses
+    to omit the `drives` key from the emitted client stanza entirely.
+
+    Per D-32, no schema change; `media_type`, `form_factor`, and
+    `performance` are deliberately NOT emitted (SER-02 submitter
+    responsibility — spec-sheet facts not derivable from lsblk).
+    """
+    try:
+        cp = subprocess.run(
+            list(_LSBLK_ARGS),
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if cp.returncode != 0:
+            return []
+        payload = json.loads(cp.stdout)
+        rows = payload.get('blockdevices', []) or []
+        out: List[Dict[str, Any]] = []
+        for row in rows:
+            try:
+                # D-31 rule 1: removable skip. Handle all three observed
+                # util-linux variants: string '1' (<2.37), int 1 (>=2.37
+                # without --bytes), and bool True (>=2.37 with newer JSON
+                # output, including WSL2 dev shell). bool is a subclass of
+                # int in Python; isinstance(True, int) is True.
+                rm = row.get('rm', 0)
+                if rm in (1, True, '1'):
+                    continue
+                # D-31 rule 2: virtual NAME prefix or TRAN.
+                name = row.get('name', '') or ''
+                if name.startswith(_DRIVE_VIRTUAL_NAME_PREFIXES):
+                    continue
+                tran = (row.get('tran') or '').lower()
+                if tran in _DRIVE_VIRTUAL_TRANS:
+                    continue
+                # D-31 rule 3: unknown TRAN drop, with empty-TRAN-nvme-name
+                # rescue per RESEARCH Q1 quirk (a).
+                if tran not in _DRIVE_ACCEPTED_TRANS:
+                    if tran == '' and name.startswith('nvme'):
+                        tran = 'nvme'  # rescue
+                    else:
+                        continue
+                # D-30 emit. Per-row try around int() catches non-int size /
+                # missing size key — isolated row failure, not whole walk.
+                capacity_in_GB = int(row['size']) // 10**9
+                out.append({
+                    'vendor_name':    (row.get('vendor') or '').strip(),
+                    'model_name':     (row.get('model') or '').strip(),
+                    'interface':      tran,
+                    'capacity_in_GB': capacity_in_GB,
+                })
+            except Exception:
+                # Per-row D-2 — single malformed row skips itself.
+                continue
+        return out
+    except (
+        FileNotFoundError,
+        subprocess.TimeoutExpired,
+        subprocess.SubprocessError,
+        json.JSONDecodeError,
+        Exception,
+    ):
+        return []
+
+
+# =============================================================================
 # Local System Information Collection
 # =============================================================================
 
@@ -1391,6 +1530,17 @@ def collect_local_system_info() -> Dict[str, Any]:
         result['errors']['environment'] = str(e)
         result['environment'] = []
 
+    # Collect lsblk -J -b -d → drives[] (D-30 emit shape, D-31 four-rule filter
+    # chain, D-33 absent/empty → [] universal-failure rule, COLL-07).
+    # collect_drives applies the D-2 envelope internally (subprocess failure +
+    # JSON parse + per-row); the outer try/except mirrors chassis_model /
+    # networking / sysctl / environment shape as defense-in-depth.
+    try:
+        result['drives'] = collect_drives()
+    except Exception as e:
+        result['errors']['drives'] = str(e)
+        result['drives'] = []
+
     # Collect /proc/vmstat
     try:
         with open('/proc/vmstat', 'r') as f:
@@ -1516,6 +1666,7 @@ import json
 import os
 import re
 import socket
+import subprocess
 import sys
 import time
 
@@ -2051,6 +2202,78 @@ def collect_environment():
         return []
 
 
+# ----- Phase 4 / Plan 04-03 drives collector (Pattern B, D-36) -----
+#
+# Untyped form to survive on Python 3.8 hosts (no Final[], no PEP-585
+# subscripted generics, no Optional[] annotation in signatures). The module
+# copy in `collect_drives()` carries the typed form. Drift between the two
+# copies is caught by TestDrivesMPIScriptParity.
+_LSBLK_ARGS = (
+    'lsblk', '-J', '-b', '-d', '-o', 'NAME,MODEL,VENDOR,SIZE,ROTA,TRAN,RM',
+)
+
+_DRIVE_VIRTUAL_NAME_PREFIXES = (
+    'loop', 'dm-', 'zram', 'ram', 'sr', 'fd',
+)
+
+_DRIVE_VIRTUAL_TRANS = frozenset(['loop', 'zram'])
+
+_DRIVE_ACCEPTED_TRANS = frozenset(['nvme', 'sata', 'sas'])
+
+
+def collect_drives():
+    """Return one dict per accepted block device (mirror of module copy,
+    D-30 emit, D-31 four-rule filter, D-33 absent/empty → []).
+    D-2 envelope: subprocess / JSON / per-row failure → []."""
+    try:
+        cp = subprocess.run(
+            list(_LSBLK_ARGS),
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if cp.returncode != 0:
+            return []
+        payload = json.loads(cp.stdout)
+        rows = payload.get('blockdevices', []) or []
+        out = []
+        for row in rows:
+            try:
+                # D-31 rule 1: removable skip — string/int/bool variants.
+                rm = row.get('rm', 0)
+                if rm in (1, True, '1'):
+                    continue
+                name = row.get('name', '') or ''
+                if name.startswith(_DRIVE_VIRTUAL_NAME_PREFIXES):
+                    continue
+                tran = (row.get('tran') or '').lower()
+                if tran in _DRIVE_VIRTUAL_TRANS:
+                    continue
+                if tran not in _DRIVE_ACCEPTED_TRANS:
+                    if tran == '' and name.startswith('nvme'):
+                        tran = 'nvme'
+                    else:
+                        continue
+                capacity_in_GB = int(row['size']) // 10**9
+                out.append({
+                    'vendor_name':    (row.get('vendor') or '').strip(),
+                    'model_name':     (row.get('model') or '').strip(),
+                    'interface':      tran,
+                    'capacity_in_GB': capacity_in_GB,
+                })
+            except Exception:
+                continue
+        return out
+    except (
+        FileNotFoundError,
+        subprocess.TimeoutExpired,
+        subprocess.SubprocessError,
+        json.JSONDecodeError,
+        Exception,
+    ):
+        return []
+
+
 def collect_local_info():
     """Collect system information from the local node."""
     result = {
@@ -2173,6 +2396,16 @@ def collect_local_info():
     except Exception as e:
         result['errors']['environment'] = str(e)
         result['environment'] = []
+
+    # Collect lsblk -J -b -d → drives[] (D-30 / D-31 / D-33, COLL-07) —
+    # Pattern B parallel to the module-side wiring. collect_drives applies
+    # the D-2 envelope internally (subprocess + JSON + per-row); this outer
+    # try/except is defense-in-depth.
+    try:
+        result['drives'] = collect_drives()
+    except Exception as e:
+        result['errors']['drives'] = str(e)
+        result['drives'] = []
 
     if not result['errors']:
         del result['errors']
