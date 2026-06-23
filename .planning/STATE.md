@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: "Phase 04 Plan 03 complete — drives collector via lsblk -J -b + D-31 filter chain + MPI script twin (COLL-07; D-30/31/33/36)"
-last_updated: "2026-06-23T22:02:35.000Z"
-last_activity: 2026-06-23 -- Phase 04 Plan 03 complete (drives collector + Rule 1 RM-bool fix, COLL-07)
+stopped_at: "Phase 04 Plan 04 complete — 3 fingerprint signature extractors + generalized _resolve_fingerprint_key dispatch + extended _FINGERPRINT_KEYS (8→11) + D-33 _splice_stub_lists drives-omit branch (COLL-05/06/07 transform-side; D-33/34/35)"
+last_updated: "2026-06-23T22:30:00.000Z"
+last_activity: 2026-06-23 -- Phase 04 Plan 04 complete (transform-layer extensions + D-33 splice; COLL-05/06/07 transform-side)
 progress:
   total_phases: 5
   completed_phases: 3
   total_plans: 21
-  completed_plans: 19
-  percent: 70
+  completed_plans: 20
+  percent: 75
 ---
 
 # Project State
@@ -26,14 +26,14 @@ See: .planning/PROJECT.md (updated 2026-06-18)
 ## Current Position
 
 Phase: 04 (sysctl-environment-and-drives-coverage) — EXECUTING
-Plan: 4 of 5
+Plan: 5 of 5
 Status: Executing Phase 04
-Last activity: 2026-06-23 -- Phase 04 Plan 03 complete (drives collector via lsblk -J -b + D-31 filter, COLL-07)
+Last activity: 2026-06-23 -- Phase 04 Plan 04 complete (3 fingerprint signatures + generalized dispatch + D-33 splice; COLL-05/06/07 transform-side)
 
 Progress (Phase 1): [██████████] 100%
 Progress (Phase 2): [██████████] 100% (6/6 plans complete; verification 7/7 passed; UAT 4/4 passed)
 Progress (Phase 3): [██████████] 100% (5/5 plans complete; Plan 03-01 schema extension + Plan 03-02 chassis collector + Plan 03-03 networking collector + Plan 03-04 transform-layer extensions + Plan 03-05 HostInfo + node_dict_from_host wire-through end-to-end all green)
-Progress (Phase 4): [██████░░░░] 60% (3/5 plans complete; Plan 04-01 sysctl collector + Plan 04-02 environment collector + unified redactors + Plan 04-03 drives collector via lsblk -J -b all green)
+Progress (Phase 4): [████████░░] 80% (4/5 plans complete; Plan 04-01 sysctl collector + Plan 04-02 environment collector + unified redactors + Plan 04-03 drives collector via lsblk -J -b + Plan 04-04 transform-layer 3 signatures + generalized dispatch + D-33 splice all green)
 
 ## Performance Metrics
 
@@ -144,6 +144,11 @@ Recent decisions affecting current work:
 - Execute 04-03 deviation (Rule 1 - Bug): PLAN's verbatim RM coercion `if str(row.get('rm', '0')) == '1': continue` works for util-linux string ('1') and int (1) variants but fails on JSON boolean variants (True) — `str(True) == 'True'`, not `'1'`. Discovered during post-GREEN smoke verification on the WSL2 dev shell: real `lsblk -J -b` output (util-linux 2.39 on Ubuntu/Debian/Microsoft WSL2) emits `"rm": true/false` and `"rota": true/false` as JSON booleans, NOT the strings or ints RESEARCH Q1 predicted. Risk on real submission hosts: a removable USB drive that lsblk recognizes with TRAN=sata or TRAN=sas would have been INCORRECTLY emitted into `clients[].drives[]` on util-linux ≥2.37+ hosts. Fix: `rm in (1, True, '1')` membership check handles all three variants uniformly. Mirrored in both module + MPI script bodies. New regression test `test_removable_rm_bool_skipped` locks the contract with both surviving (`rm: False`) and removable (`rm: True`) bool rows. Rule 1 (correctness bug, not Rule 2 missing-feature or Rule 4 architectural change) — folded into GREEN commit 2766aeb since the fix is structurally required for the contract to work on real hosts.
 - Execute 04-03 surprise: WSL2 (Microsoft Hyper-V virtio-block) emits `"tran": null` (JSON null → Python None) for all four `sda`/`sdb`/`sdc`/`sdd` virtual disks. End-to-end behavior: `(row.get('tran') or '').lower()` collapses both null and '' to ''; D-31 rule 3 drops all four rows because none start with `nvme` (no rescue). `collect_drives()` returns `[]` end-to-end on this WSL2 dev shell, exercising the D-33 universal-empty path LIVE — confirming the architectural contract that Plan 04-04's splice layer will need to omit the `drives` key entirely on hosts the collector cannot classify.
 - Execute 04-03 process: NO `git stash` used. Read-only inspection only via the Read tool against committed files. Rule 1 fix folded into the GREEN commit alongside the production change rather than a separate hygiene commit — same convention as 04-02's Rule 3 contract-test updates.
+- Execute 04-04: transform-layer extensions shipped — 3 new D-22/D-34 signature extractors (`_sysctl_signature`, `_environment_signature`, `_drive_signature`) following the Phase-3 `_network_signature` template verbatim (same `key=repr` defense, same `.get(..., '')` defaults). `_EXTRACTOR_SOURCE_KEYS` plain-dict module constant added at line ~140 immediately before the generalized `_resolve_fingerprint_key` (4-entry dispatch: networking_sig→networking, sysctl_sig→sysctl, environment_sig→environment, drives_sig→drives). `_FINGERPRINT_KEYS` grew from Phase-3 8-tuple to 11-tuple by appending the 3 new (name, extractor) tuples at the tail in slice-completion order. `_resolve_fingerprint_key` function signature unchanged; only the body generalized to `extractor(item.get(_EXTRACTOR_SOURCE_KEYS[name], []))` — zero ripple on the consumer (`group_by_fingerprint` call site untouched). `_splice_stub_lists` extended with the D-33 conditional drives-omit branch replacing the Phase-2 unconditional `client['drives'] = [dict(_DRIVE_STUB)]` line: real drives → pass; empty/missing → `client.pop('drives', None)`. `_DRIVE_STUB` constant retained with a 6-line Phase-2-legacy comment for diff minimization and legacy test-import contract.
+- Execute 04-04: 35 new tests across 8 new classes in `tests/unit/test_auto_generator.py` (TestSysctlSignature 5, TestEnvironmentSignature 5, TestDriveSignature 6 incl. the load-bearing mixed-type `key=repr` lock, TestExtractorSourceKeys 2, TestResolveFingerprintKeyGeneralized 6, TestFingerprintKeysExtended 3, TestGroupByFingerprintSplitsOnNewKeys 4 incl. D-35 strict-split tests, TestSpliceStubListsDrivesOmitBranch 4 incl. `_DRIVE_STUB` legacy-import lock) all GREEN. 5 existing Phase-2/3 unit tests updated in the RED commit for the D-33 contract: test_splice_stub_lists_adds_to_every_client, test_splice_stub_lists_multiple_clients, test_splice_stub_lists_idempotent, test_outer_dict_with_spliced_stubs_yaml_roundtrip, TestSpliceUpNicTraffic::test_drives_key_omitted_when_no_drives (renamed from test_existing_phase2_drives_stub_unchanged). All 102 test_auto_generator.py tests pass (67 prior + 35 new). Full unit suite 1826 passed, 7 pre-existing failures (out-of-scope per Rule 3 scope boundary).
+- Execute 04-04 deviation (Rule 3): tests/integration/test_systemname_yaml_end_to_end.py::test_validator_errors_only_on_blanks asserted the schema validator surfaces errors under clients[].drives[*] (Phase-2 stub-blank behavior). Per D-33, drives key is OMITTED entirely; `drives` is Optional on NodeDescription, so the validator does NOT surface a drives[*] error path. Test updated to assert (a) drives key absent from on-disk YAML via yaml.safe_load, and (b) no drives error in validator output. Folded into the GREEN commit (same convention as Plan 04-02's redactor contract-test updates and Plan 04-03's RM-bool Rule 1 fix). Rule 3 (not Rule 1 or 4) because the production code is correct — the test simply needs to assert on the new D-33 contract instead of the old Phase-2 stub-blank contract.
+- Execute 04-04 surprise: NONE in production code. `key=repr` was shipped from first GREEN diff per PATTERNS.md guidance (NOT discovered during GREEN as in Plan 03-04). The mixed-type sort safety contract for `_drive_signature` was explicitly tested as load-bearing in `TestDriveSignature::test_mixed_type_sort_safety_per_d22_key_repr` (int 500 vs str '' collision); the test would fail without `key=repr` but the GREEN code shipped it from the start. The only "surprise" was the planner not flagging the integration-test-impact zone in the PLAN.md test-impact list (scoped to test_auto_generator.py only); this is logged as a Rule 3 finding rather than a surprise because PATTERNS.md DID flag the D-33 splice change as test-impacting, just not in the integration file specifically.
+- Execute 04-04 process: NO `git stash` used. Read-only inspection only via the Read tool against committed files. Test contract updates folded into the same commit as the production change that requires them (RED for unit tests, GREEN for the integration test — the integration test wasn't in the planner's test-impact zone so it surfaced during GREEN broader-suite verification, which is exactly when Rule 3 fires).
 
 ### Pending Todos
 
@@ -169,11 +174,11 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-06-23T22:02:35.000Z
-Stopped at: Phase 04 Plan 03 complete — drives collector via lsblk -J -b + D-31 four-rule filter + MPI script twin + Rule 1 RM-bool fix (COLL-07; D-30/31/33/36)
-Resume file: .planning/phases/04-sysctl-environment-and-drives-coverage/04-03-SUMMARY.md
+Last session: 2026-06-23T22:30:00.000Z
+Stopped at: Phase 04 Plan 04 complete — 3 fingerprint signature extractors (`_sysctl_signature`, `_environment_signature`, `_drive_signature`) + `_EXTRACTOR_SOURCE_KEYS` dispatch map + generalized `_resolve_fingerprint_key` + extended `_FINGERPRINT_KEYS` (8 → 11-tuple) + D-33 `_splice_stub_lists` drives-omit branch + 1 Rule 3 integration-test contract update (COLL-05/06/07 transform-side; D-33/34/35)
+Resume file: .planning/phases/04-sysctl-environment-and-drives-coverage/04-04-SUMMARY.md
 Next-session options:
-  (a) Continue Phase 4: `/gsd-execute-phase 4` — Plan 04-04 is the auto_generator transform-layer extensions (3 new fingerprint signature extractors + generalized `_resolve_fingerprint_key` dispatch + extended `_FINGERPRINT_KEYS` 8-tuple → 11-tuple + D-33 `_splice_stub_lists` drives-omit branch — COLL-05/06/07 transform-side; D-33/34/35). This is the Plan-04-03 architectural pair: the omit-when-empty behavior the collector signals via `[]` finally lands as the YAML emit-time `client.pop('drives', None)` here.
+  (a) Continue Phase 4: `/gsd-execute-phase 4` — Plan 04-05 is the final integration layer (HostInfo.sysctl + HostInfo.environment + HostInfo.drives fields + node_dict_from_host emit-shape extension + end-to-end integration tests; COLL-05/06/07 closure). This is what realizes the end-to-end value of Plans 04-01/02/03/04: the new collectors + the new transform layer get wired into the data path so a real `mlpstorage run` produces YAML where sysctl + environment + drives blocks reflect actual collected data.
   (b) Resume Phase 3 hardware UAT on a real server: `/gsd-verify-work 3` — Test 1 is entry point; Test 4 can be marked pass-by-evidence from 03-UAT.md frontmatter immediately.
   (c) Cheap hygiene: `/gsd-secure-phase 02` (Path-B skipped during transition) or REQUIREMENTS.md traceability sync for SCH-01/BUN-01/ADP-01.
 Open follow-ups carried forward (all from prior phases, not blocking Phase 3):
