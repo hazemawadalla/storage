@@ -210,27 +210,39 @@ def group_by_fingerprint(
 def node_dict_from_host(host: HostInfo) -> dict:
     """Map a `HostInfo` into a `NodeDescription`-shaped dict.
 
-    Output shape (Plan 02-02 deliverable — `networking` and `drives` are
-    spliced by Plan 02-03; `quantity` is injected by `group_by_fingerprint`):
+    Output shape (Phase 3 / Plan 03-05 deliverable — `drives` is spliced by
+    Plan 02-03's `_splice_stub_lists`; `quantity` is injected by
+    `group_by_fingerprint`; `networking` is now emitted directly here from
+    `host.networking` via a per-host `group_by_fingerprint` pass):
 
         {
           "friendly_description": "",
           "chassis": {
-            "model_name": "",          # SER-02 blank; Phase 3 fills via lshw
-            "cpu_model": <str | "">,    # COLL-01
-            "cpu_qty": <int | "">,      # COLL-01 via host.cpu.num_sockets (D-16)
-            "cpu_cores": <int | "">,    # COLL-01 via host.cpu.num_cores
+            "model_name": <str | "">,    # COLL-03 from host.chassis_model
+            "cpu_model": <str | "">,     # COLL-01
+            "cpu_qty": <int | "">,       # COLL-01 via host.cpu.num_sockets (D-16)
+            "cpu_cores": <int | "">,     # COLL-01 via host.cpu.num_cores
             "memory_capacity": <int | "">,  # COLL-01, GiB (D-6)
           },
           "operating_system": {
             "name": <str | "">,          # COLL-02 via os_release NAME
             "version": <str | "">,       # COLL-02 via os_release VERSION_ID
           },
+          "networking": [<grouped stanzas> | []],  # COLL-04: per-host
+              # group_by_fingerprint(host.networking, ("type","speed","state"),
+              # "unit_count") collapses identical NICs into stanzas with
+              # unit_count=N. Empty host.networking → []; downstream
+              # `_splice_stub_lists` then either splices D-17 traffic=[] onto
+              # up entries (real-data branch) or falls back to the Phase 2
+              # _NETWORKING_STUB blank entry (fallback branch).
         }
 
     Defensive on every field per the universal collection-failure rule
     (CONTEXT.md D-2 / Pitfall 9): if any source is missing, blank or zero,
-    that single field becomes `""` — the function never raises.
+    that single field becomes `""` — the function never raises. Pattern F
+    `(host.chassis_model or "")` coerces None/missing falsy values to the
+    blank-string emit so downstream YAML serialization sees a deterministic
+    str regardless of dataclass default vs. malicious None.
 
     Memory rounding (D-6): `host.memory.total` is bytes (see
     `HostMemoryInfo.from_proc_meminfo_dict` which converts kB → bytes at
@@ -273,10 +285,27 @@ def node_dict_from_host(host: HostInfo) -> dict:
         os_name = host.system.os_release.get("NAME", "") or ""
         os_version = host.system.os_release.get("VERSION_ID", "") or ""
 
+    # COLL-04 (Plan 03-05): per-host networking grouping. group_by_fingerprint
+    # over (type, speed, state) collapses identical NICs into stanzas with
+    # unit_count=N (e.g. two up 100GbE entries → one stanza with unit_count=2).
+    # Empty host.networking → []; downstream _splice_stub_lists then falls
+    # back to the _NETWORKING_STUB blank entry (D-3 universal-rule symmetry)
+    # so the YAML still surfaces the SER-02 collector-blind UX on hosts where
+    # networking collection failed entirely. Up entries on the real-data
+    # branch receive the D-17 `traffic: []` splice at _splice_stub_lists time.
+    if host.networking:
+        per_host_networking = group_by_fingerprint(
+            host.networking,
+            ("type", "speed", "state"),
+            "unit_count",
+        )
+    else:
+        per_host_networking = []
+
     return {
         "friendly_description": "",  # SER-02 blank — human declaration
         "chassis": {
-            "model_name": "",        # SER-02 blank — Phase 3 fills via lshw
+            "model_name": (host.chassis_model or ""),  # Phase 3 / COLL-03 — DMI placeholder normalization in collector; Pattern F defensive blank-on-falsy
             # rack_units OMITTED per D-2 row 4 (optional + non-derivable)
             "cpu_model": cpu_model,
             "cpu_qty": cpu_qty,
@@ -284,11 +313,12 @@ def node_dict_from_host(host: HostInfo) -> dict:
             "memory_capacity": memory_capacity,
             # power OMITTED per D-2 row 4 (optional + non-derivable)
         },
-        # networking / drives: spliced by Plan 02-03's _splice_stub_lists
+        "networking": per_host_networking,  # Phase 3 / COLL-04 — directly emitted; drives still spliced by Plan 02-03's _splice_stub_lists
         "operating_system": {
             "name": os_name,
             "version": os_version,
         },
+        # drives: spliced by Plan 02-03's _splice_stub_lists
         # environment / sysctl: Phase 4 territory — not emitted here
         # quantity: injected by group_by_fingerprint downstream
     }

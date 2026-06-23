@@ -176,6 +176,8 @@ class HostInfo:
     disks: Optional[List[HostDiskInfo]] = None
     network: Optional[List[HostNetworkInfo]] = None
     system: Optional[HostSystemInfo] = None
+    chassis_model: str = ""                                              # Phase 3 (COLL-03)
+    networking: List[Dict[str, Any]] = field(default_factory=list)       # Phase 3 (COLL-04)
     collection_timestamp: Optional[str] = None
 
     @classmethod
@@ -240,6 +242,13 @@ class HostInfo:
             total_processes=loadavg.get('total_processes', 0),
         )
 
+        # Phase 3 / Plan 03-05: COLL-03 + COLL-04 — flow the chassis_model
+        # scalar (D-21 placeholder-normalized in collect_chassis_model) and
+        # per-host networking list (Plan 03-03 emit shape) onto the dataclass.
+        # Universal D-2 collection-failure rule: missing keys default to ''/[].
+        chassis_model = data.get('chassis_model', '')
+        networking = data.get('networking', [])
+
         return cls(
             hostname=hostname,
             memory=memory,
@@ -247,6 +256,8 @@ class HostInfo:
             disks=disks,
             network=network,
             system=system,
+            chassis_model=chassis_model,
+            networking=networking,
             collection_timestamp=data.get('collection_timestamp'),
         )
 
