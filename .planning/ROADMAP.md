@@ -143,12 +143,12 @@ Decimal phases appear between their surrounding integers in numeric order.
   4. The generated drive entries do NOT contain `media_type`, `form_factor`, or `performance` (those remain blank for the submitter to fill from spec sheets per SER-02).
   5. On a host where `lsblk` is not installed or returns no devices, `clients[].drives` is omitted from the YAML and `run` still completes without error.
 
-**Plans:** 5 plans
+**Plans:** 3/5 plans complete
 **Wave 1**
 
 - [x] 04-01-PLAN.md — Slice 1: sysctl collector + allowlist file + MPI script duplication (COLL-05; D-27/28/29/36)
 - [x] 04-02-PLAN.md — Slice 2: environment collector + redactor unification in storage_config.py + MPI script duplication + ROADMAP SC #2 reconciliation (COLL-06; D-23/24/25/26/36)
-- [ ] 04-03-PLAN.md — Slice 3: drives collector via lsblk -J -b subprocess + D-31 filter + MPI script duplication (COLL-07; D-30/31/33/36)
+- [x] 04-03-PLAN.md — Slice 3: drives collector via lsblk -J -b subprocess + D-31 filter + MPI script duplication (COLL-07; D-30/31/33/36)
 
 **Wave 2** *(blocked on Wave 1)*
 

@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: "Phase 04 Plan 02 complete — environment collector + unified redactors in storage_config + ROADMAP SC #2 reconciled (COLL-06)"
-last_updated: "2026-06-23T22:00:00.000Z"
-last_activity: 2026-06-23 -- Phase 04 Plan 02 complete (environment collector + D-25 redactor unification, COLL-06)
+stopped_at: "Phase 04 Plan 03 complete — drives collector via lsblk -J -b + D-31 filter chain + MPI script twin (COLL-07; D-30/31/33/36)"
+last_updated: "2026-06-23T22:02:35.000Z"
+last_activity: 2026-06-23 -- Phase 04 Plan 03 complete (drives collector + Rule 1 RM-bool fix, COLL-07)
 progress:
   total_phases: 5
   completed_phases: 3
   total_plans: 21
-  completed_plans: 18
-  percent: 67
+  completed_plans: 19
+  percent: 70
 ---
 
 # Project State
@@ -26,14 +26,14 @@ See: .planning/PROJECT.md (updated 2026-06-18)
 ## Current Position
 
 Phase: 04 (sysctl-environment-and-drives-coverage) — EXECUTING
-Plan: 3 of 5
+Plan: 4 of 5
 Status: Executing Phase 04
-Last activity: 2026-06-23 -- Phase 04 Plan 02 complete (environment collector + D-25 redactor unification, COLL-06)
+Last activity: 2026-06-23 -- Phase 04 Plan 03 complete (drives collector via lsblk -J -b + D-31 filter, COLL-07)
 
 Progress (Phase 1): [██████████] 100%
 Progress (Phase 2): [██████████] 100% (6/6 plans complete; verification 7/7 passed; UAT 4/4 passed)
 Progress (Phase 3): [██████████] 100% (5/5 plans complete; Plan 03-01 schema extension + Plan 03-02 chassis collector + Plan 03-03 networking collector + Plan 03-04 transform-layer extensions + Plan 03-05 HostInfo + node_dict_from_host wire-through end-to-end all green)
-Progress (Phase 4): [████░░░░░░] 40% (2/5 plans complete; Plan 04-01 sysctl collector + Plan 04-02 environment collector + unified redactors all green)
+Progress (Phase 4): [██████░░░░] 60% (3/5 plans complete; Plan 04-01 sysctl collector + Plan 04-02 environment collector + unified redactors + Plan 04-03 drives collector via lsblk -J -b all green)
 
 ## Performance Metrics
 
@@ -140,6 +140,10 @@ Recent decisions affecting current work:
 - Execute 04-02 deviation (Rule 3): two pre-existing tests asserted the legacy `[SET —` marker on the `aws_access_key_id_redacted` shape — `tests/unit/test_storage_config.py::TestCredentialRedaction::test_access_key_redacted_when_set` and `tests/unit/test_run_summary.py::TestCredentialDisplay::test_credentials_never_plain_text`. Both updated in the GREEN commit (4f310cd) to assert the new D-23 masked form (`AKIA****MPLE` / `secr****t123`); the run_summary test extended to set BOTH credentials and validate (a) no raw values, (b) masked KEY_ID, (c) length-only SECRET. Rule 3 (not Rule 1 or 4) because these are blocking-task-completion issues caused directly by the D-25 contract change this plan ships — the contract test updates are structurally part of the refactor and belong in the GREEN commit alongside the production change.
 - Execute 04-02 surprise: ROADMAP.md SC #2 line uses an em-dash sentence structure ("with X redacted as Y and Z rendered as W matching the policy in `storage_config.py`") that required preserving the exact text shape during the D-24 reconciliation. New wording ("length-only sentinel (per D-24) ... first-4/last-4 mask (per D-23) using the unified policy in `storage_config.py`") keeps the same em-dash + adjacent-text structure so a future verifier diff sees a focused content change, not a cosmetic rewrite. The `grep -n 'length-only sentinel' .planning/ROADMAP.md` gate from PLAN acceptance criteria returns line 141.
 - Execute 04-02 process: NO `git stash` used. Read-only inspection only via the Read tool against committed files. Test contract updates kept in the same commit as the production change they validate (rather than a separate "test fix" commit) so the GREEN commit is self-contained: if a future bisect points at 4f310cd, the entire D-25 contract change AND its test contract validation land together.
+- Execute 04-03: drives collector shipped as 4 new module symbols (`_LSBLK_ARGS`, `_DRIVE_VIRTUAL_NAME_PREFIXES`, `_DRIVE_VIRTUAL_TRANS`, `_DRIVE_ACCEPTED_TRANS`) + `collect_drives()` with two-scope D-2 envelope (outer subprocess + per-row try/except), D-31 four-rule filter chain in early-continue ladder form (mirror of `collect_networking` lines 933-967), and D-30 emit shape. Pattern B (D-36) twins inline in `MPI_COLLECTOR_SCRIPT` with `import subprocess` added to script imports (first script-side subprocess shell-out; sysctl/env/chassis/networking were all pure file/env reads). Frozenset literals use iterable-arg form `frozenset(['nvme','sata','sas'])` per Plan 04-01 script-side convention. New parity-test pattern: `ns['subprocess'] = mock_subprocess` injection into exec'd script namespace BEFORE calling `ns['collect_drives']()`, preserving real `TimeoutExpired` / `SubprocessError` attributes on the mock so script-side except tuples resolve at exec time. 20 new tests across 3 classes (TestDrivesCollector 16, TestDrivesMPIScriptParity 1, TestDrivesWiring 3) all green; 247 cluster_collector unit tests pass. D-33 omit-when-empty behavior remains the auto_generator transform-layer's responsibility (Plan 04-04) — `collect_drives()` returns `[]` for both 'lsblk absent' and 'lsblk returned but all rows filtered' per universal D-2; the splice layer in Plan 04-04 will pop the `drives` key.
+- Execute 04-03 deviation (Rule 1 - Bug): PLAN's verbatim RM coercion `if str(row.get('rm', '0')) == '1': continue` works for util-linux string ('1') and int (1) variants but fails on JSON boolean variants (True) — `str(True) == 'True'`, not `'1'`. Discovered during post-GREEN smoke verification on the WSL2 dev shell: real `lsblk -J -b` output (util-linux 2.39 on Ubuntu/Debian/Microsoft WSL2) emits `"rm": true/false` and `"rota": true/false` as JSON booleans, NOT the strings or ints RESEARCH Q1 predicted. Risk on real submission hosts: a removable USB drive that lsblk recognizes with TRAN=sata or TRAN=sas would have been INCORRECTLY emitted into `clients[].drives[]` on util-linux ≥2.37+ hosts. Fix: `rm in (1, True, '1')` membership check handles all three variants uniformly. Mirrored in both module + MPI script bodies. New regression test `test_removable_rm_bool_skipped` locks the contract with both surviving (`rm: False`) and removable (`rm: True`) bool rows. Rule 1 (correctness bug, not Rule 2 missing-feature or Rule 4 architectural change) — folded into GREEN commit 2766aeb since the fix is structurally required for the contract to work on real hosts.
+- Execute 04-03 surprise: WSL2 (Microsoft Hyper-V virtio-block) emits `"tran": null` (JSON null → Python None) for all four `sda`/`sdb`/`sdc`/`sdd` virtual disks. End-to-end behavior: `(row.get('tran') or '').lower()` collapses both null and '' to ''; D-31 rule 3 drops all four rows because none start with `nvme` (no rescue). `collect_drives()` returns `[]` end-to-end on this WSL2 dev shell, exercising the D-33 universal-empty path LIVE — confirming the architectural contract that Plan 04-04's splice layer will need to omit the `drives` key entirely on hosts the collector cannot classify.
+- Execute 04-03 process: NO `git stash` used. Read-only inspection only via the Read tool against committed files. Rule 1 fix folded into the GREEN commit alongside the production change rather than a separate hygiene commit — same convention as 04-02's Rule 3 contract-test updates.
 
 ### Pending Todos
 
@@ -165,11 +169,11 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-06-23T22:00:00.000Z
-Stopped at: Phase 04 Plan 02 complete — environment collector + unified redactors in storage_config + ROADMAP SC #2 reconciled (COLL-06)
-Resume file: .planning/phases/04-sysctl-environment-and-drives-coverage/04-02-SUMMARY.md
+Last session: 2026-06-23T22:02:35.000Z
+Stopped at: Phase 04 Plan 03 complete — drives collector via lsblk -J -b + D-31 four-rule filter + MPI script twin + Rule 1 RM-bool fix (COLL-07; D-30/31/33/36)
+Resume file: .planning/phases/04-sysctl-environment-and-drives-coverage/04-03-SUMMARY.md
 Next-session options:
-  (a) Continue Phase 4: `/gsd-execute-phase 4` — Plan 04-03 is the drives collector via `lsblk -J -d -o NAME,MODEL,VENDOR,SIZE,ROTA,TRAN,RM` (COLL-07; D-30/31/32/33/36). Pattern A/B discipline established in 04-01 / 04-02 carries forward; D-2 envelope at outer subprocess.run + per-row filter, D-33 omit-key-when-empty behavior at the transform layer (Plan 04-04), NOT at the collector.
+  (a) Continue Phase 4: `/gsd-execute-phase 4` — Plan 04-04 is the auto_generator transform-layer extensions (3 new fingerprint signature extractors + generalized `_resolve_fingerprint_key` dispatch + extended `_FINGERPRINT_KEYS` 8-tuple → 11-tuple + D-33 `_splice_stub_lists` drives-omit branch — COLL-05/06/07 transform-side; D-33/34/35). This is the Plan-04-03 architectural pair: the omit-when-empty behavior the collector signals via `[]` finally lands as the YAML emit-time `client.pop('drives', None)` here.
   (b) Resume Phase 3 hardware UAT on a real server: `/gsd-verify-work 3` — Test 1 is entry point; Test 4 can be marked pass-by-evidence from 03-UAT.md frontmatter immediately.
   (c) Cheap hygiene: `/gsd-secure-phase 02` (Path-B skipped during transition) or REQUIREMENTS.md traceability sync for SCH-01/BUN-01/ADP-01.
 Open follow-ups carried forward (all from prior phases, not blocking Phase 3):
