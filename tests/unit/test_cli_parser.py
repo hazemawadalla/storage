@@ -70,9 +70,9 @@ class TestCLIStructureAndCombinations:
     @pytest.mark.parametrize("test_name, cmd_list, expected_mode_or_benchmark, expected_command", [
         # Training — model is now a positional (no --model flag); storage type is positional
         # closed mode: only 'unet3d' and 'retinanet' are valid model choices
-        ("01", ['training', 'retinanet', 'run', '-cm', '1024', '-at', 'b200', '-na', '4', '-rd', '/tmp', 'file'], 'training', 'run'),
+        ("01", ['training', 'retinanet', 'run', '-cm', '1024', '-at', 'b200', '-na', '4', '-dd', '/tmp', '-rd', '/tmp', 'file'], 'training', 'run'),
         ("02", ['training', 'unet3d', 'datasize', '-cm', '1024', '-at', 'b200', '-ma', '4'], 'training', 'datasize'),
-        ("03", ['training', 'unet3d', 'datagen', '-np', '4', 'file', '-rd', '/tmp'], 'training', 'datagen'),
+        ("03", ['training', 'unet3d', 'datagen', '-np', '4', '-dd', '/tmp', 'file', '-rd', '/tmp'], 'training', 'datagen'),
         ("04", ['training', 'unet3d', 'configview', '-na', '4', '-cm', '64', '-at', 'b200', '-rd', '/tmp', 'file'], 'training', 'configview'),
 
         # Checkpointing — --model stays as a flag; storage type is positional
@@ -126,7 +126,7 @@ class TestCLIStructureAndCombinations:
     def test_data_access_protocol_positional(self):
         """Test that the data_access_protocol positional is set correctly."""
         # Use 'unet3d' — a valid model in closed mode
-        test_args = ['mlpstorage', 'closed', 'training', 'unet3d', 'datagen', '-np', '4', 'file', '-rd', '/tmp']
+        test_args = ['mlpstorage', 'closed', 'training', 'unet3d', 'datagen', '-np', '4', '-dd', '/tmp', 'file', '-rd', '/tmp']
         with patch('sys.argv', test_args):
             args = parse_arguments()
             assert args.data_access_protocol == 'file'
@@ -161,6 +161,71 @@ class TestCustomValidation:
             with pytest.raises(SystemExit) as exc_info:
                 parse_arguments()
             assert exc_info.value.code == EXIT_CODE.INVALID_ARGUMENTS
+
+
+class TestTrainingDataDirEnforcement:
+    """Cover the file-fast-fail / object-post-YAML split for --data-dir."""
+
+    @pytest.mark.parametrize("command, extra", [
+        ("datagen", ['-np', '4']),
+        ("run", ['-cm', '64', '-at', 'b200', '-na', '4']),
+    ])
+    def test_file_mode_missing_data_dir_fails_at_parse(self, command, extra):
+        """File storage must reject training datagen/run without --data-dir at the CLI boundary."""
+        argv = ['mlpstorage', 'closed', 'training', 'unet3d', command,
+                *extra, '-rd', '/tmp', 'file']
+        with patch('sys.argv', argv):
+            with pytest.raises(SystemExit) as exc_info:
+                parse_arguments()
+            assert exc_info.value.code != 0
+
+    @pytest.mark.parametrize("data_dir", ['retinanet', 's3://bucket/unet3d', 'unet3d/data'])
+    def test_object_mode_accepts_explicit_data_dir(self, data_dir):
+        """Object storage accepts a bare key prefix, full URI, or nested prefix as --data-dir."""
+        argv = ['mlpstorage', 'closed', 'training', 'unet3d', 'datagen',
+                '-np', '4', '--data-dir', data_dir, '-rd', '/tmp', 'object']
+        with patch('sys.argv', argv):
+            args = parse_arguments()
+        assert args.data_access_protocol == 'object'
+        assert args.data_dir == data_dir
+
+    def test_object_mode_data_dir_from_config_file(self, tmp_path):
+        """Object storage must accept data_dir supplied via --config-file (Russ' P2 regression case)."""
+        config_file = tmp_path / "object-config.yaml"
+        config_file.write_text("data_dir: retinanet\n")
+
+        argv = ['mlpstorage', 'closed', 'training', 'unet3d', 'datagen',
+                '-np', '4', '-rd', '/tmp',
+                '--config-file', str(config_file), 'object']
+        with patch('sys.argv', argv):
+            args = parse_arguments()
+        assert args.data_access_protocol == 'object'
+        assert args.data_dir == 'retinanet'
+
+    def test_object_mode_missing_data_dir_fails_after_yaml(self):
+        """Object storage without --data-dir (and no config-file supplying it) must still fail."""
+        argv = ['mlpstorage', 'closed', 'training', 'unet3d', 'datagen',
+                '-np', '4', '-rd', '/tmp', 'object']
+        with patch('sys.argv', argv):
+            with pytest.raises(SystemExit) as exc_info:
+                parse_arguments()
+            assert exc_info.value.code == EXIT_CODE.INVALID_ARGUMENTS
+
+    def test_file_mode_data_dir_from_config_file(self, tmp_path):
+        """File storage may also accept data_dir from --config-file (no immediate failure if CLI omits it)."""
+        config_file = tmp_path / "file-config.yaml"
+        config_file.write_text("data_dir: /mnt/data\n")
+
+        argv = ['mlpstorage', 'closed', 'training', 'unet3d', 'datagen',
+                '-np', '4', '-rd', '/tmp',
+                '--config-file', str(config_file), 'file']
+        # File-mode check runs before YAML, so this still fails fast even though
+        # the YAML would have supplied data_dir. Users supplying data_dir via
+        # YAML for file storage must also pass --data-dir on the CLI.
+        with patch('sys.argv', argv):
+            with pytest.raises(SystemExit) as exc_info:
+                parse_arguments()
+            assert exc_info.value.code != 0
 
 
 # =====================================================================
