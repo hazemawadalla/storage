@@ -3,8 +3,8 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: verifying
-stopped_at: "Phase 04 Plan 05 complete — HostInfo.sysctl + HostInfo.environment + HostInfo.drives fields + HostInfo.from_collected_data extension + node_dict_from_host emit-shape extension (3 new top-level keys; per-host group_by_fingerprint pass for drives) + 25 new unit tests + 9 new integration tests (TestPhase4EndToEnd covering ROADMAP SC #1-5 + D-35 cross-host strict-split + homogeneous-collapse + Yamale schema validation) all green. Phase 4 vertical end-to-end COMPLETE. D-33 omit-key path LIVE-CONFIRMED on WSL2 dev shell."
-last_updated: "2026-06-23T23:30:37.907Z"
+stopped_at: "Phase 5 context gathered (D-37..D-49 locked: round-trip-recompute drift, fingerprint match, unified-diff format, SystemDriftError, sentinel-file CAP-02, MPI-barrier quiesce)"
+last_updated: "2026-06-24T00:22:17.151Z"
 last_activity: 2026-06-23 -- Phase 04 verified (8/8 after inline gap-closure)
 progress:
   total_phases: 5
@@ -180,9 +180,9 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-06-23T23:00:00.000Z
-Stopped at: Phase 04 Plan 05 complete — HostInfo.sysctl + HostInfo.environment + HostInfo.drives fields + HostInfo.from_collected_data extension + node_dict_from_host emit-shape extension (3 new top-level keys; per-host group_by_fingerprint pass for drives) + 25 new unit tests + 9 new integration tests (TestPhase4EndToEnd covering ROADMAP SC #1-5 + D-35 cross-host strict-split + homogeneous-collapse + Yamale schema validation) all green. Phase 4 vertical end-to-end COMPLETE. D-33 omit-key path LIVE-CONFIRMED on WSL2 dev shell.
-Resume file: .planning/phases/04-sysctl-environment-and-drives-coverage/04-05-SUMMARY.md
+Last session: 2026-06-24T00:22:17.135Z
+Stopped at: Phase 5 context gathered (D-37..D-49 locked: round-trip-recompute drift, fingerprint match, unified-diff format, SystemDriftError, sentinel-file CAP-02, MPI-barrier quiesce)
+Resume file: .planning/phases/05-logical-diff-lifecycle-capacity-gate/05-CONTEXT.md
 Next-session options:
   (a) Verify Phase 4: `/gsd-verify-phase 04` — flip Phase 4 status from `executing` to `verified`. Standard Phase 2/3-style verification: re-run the full Phase 4 target slice (`tests/unit/test_cluster_collector.py tests/unit/test_auto_generator.py tests/integration/test_systemname_yaml_end_to_end.py`), check ROADMAP SC #1-5 coverage, generate 04-VERIFICATION.md.
   (b) Transition Phase 4 → Phase 5: `/gsd-transition` — advance to Phase 5 (LIFE-02 logical-diff lifecycle + CAP-01 capacity gate + CAP-02 shared-filesystem verification per ROADMAP.md).
