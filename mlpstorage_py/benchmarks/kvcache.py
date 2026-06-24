@@ -33,6 +33,40 @@ from mlpstorage_py.interfaces import BenchmarkCommand
 from mlpstorage_py.utils import generate_mpi_prefix_cmd, MLPSJsonEncoder
 
 
+# MLPerf v3.0 fixed per-option workload parameters. Single source of truth for
+# what option N means at the kv-cache.py level. In CLOSED these are mandated;
+# in OPEN they act as per-option defaults that user CLI flags supersede.
+WORKLOAD_PARAMS = {
+    1: {
+        'model': 'llama3.1-8b',
+        'num-users': 200,
+        'duration': 300,
+        'gpu-mem-gb': 0,
+        'cpu-mem-gb': 0,
+        'max-concurrent-allocs': 16,
+        'generation-mode': 'none',
+    },
+    2: {
+        'model': 'llama3.1-8b',
+        'num-users': 100,
+        'duration': 300,
+        'gpu-mem-gb': 0,
+        'cpu-mem-gb': 4,
+        'max-concurrent-allocs': 16,
+        'generation-mode': 'none',
+    },
+    3: {
+        'model': 'llama3.1-70b-instruct',
+        'num-users': 70,
+        'duration': 300,
+        'gpu-mem-gb': 0,
+        'cpu-mem-gb': 0,
+        'max-concurrent-allocs': 4,
+        'generation-mode': 'none',
+    },
+}
+
+
 class KVCacheBenchmark(Benchmark):
     """KV Cache benchmark for LLM inference storage.
 
@@ -234,6 +268,8 @@ class KVCacheBenchmark(Benchmark):
         )
 
         wrapper_path = Path(self.kvcache_bin_path).parent / 'mlperf_wrapper.py'
+        # Wrapper-adjacent config.yaml is the default; CLOSED forbids overriding.
+        config_path = config or str(Path(self.kvcache_bin_path).parent / 'config.yaml')
 
         mpi_prefix = generate_mpi_prefix_cmd(
             mpi_cmd=getattr(self.args, 'mpi_bin', 'mpirun'),
@@ -248,6 +284,7 @@ class KVCacheBenchmark(Benchmark):
 
         option_results = {}
         for option in [1, 2, 3]:
+            option_kv_args = self._build_option_kvcache_args(option, is_closed)
             trial_dirs = []
 
             for trial in range(trials):
@@ -258,13 +295,12 @@ class KVCacheBenchmark(Benchmark):
 
                 wrapper_cmd = (
                     f"{mpi_prefix} {sys.executable} {wrapper_path}"
-                    f" --option {option}"
-                    f" --seed {seed}"
-                    f" --base-output-dir {option_trial_dir}"
-                    f" --cache-dir {cache_dir}"
+                    f" --rank-output-base {option_trial_dir}"
+                    f" --rank-cache-base {cache_dir}"
+                    f" --seed-base {seed}"
+                    f" --config {config_path}"
+                    f" {' '.join(option_kv_args)}"
                 )
-                if config:
-                    wrapper_cmd += f" --config {config}"
 
                 self.logger.status(f"Running option {option} trial {trial + 1}/{trials}...")
                 self._execute_command(
@@ -291,6 +327,53 @@ class KVCacheBenchmark(Benchmark):
         self.write_metadata()
         self.write_cluster_info()
         return 0
+
+    def _build_option_kvcache_args(self, option: int, is_closed: bool) -> List[str]:
+        """Return the kv-cache.py CLI args for this option.
+
+        CLOSED: emits WORKLOAD_PARAMS[option] verbatim — MLPerf-mandated, no
+        user input can reach kv-cache.py through this path because the CLOSED
+        CLI does not expose the corresponding flags.
+
+        OPEN: user-set flags supersede WORKLOAD_PARAMS[option] one key at a
+        time. max-concurrent-allocs is not exposed by the OPEN CLI, so it
+        always comes from WORKLOAD_PARAMS.
+        """
+        defaults = WORKLOAD_PARAMS[option]
+        if is_closed:
+            params = dict(defaults)
+        else:
+            params = {
+                'model': getattr(self.args, 'model', None) or defaults['model'],
+                'num-users': (
+                    getattr(self.args, 'num_users', None)
+                    if getattr(self.args, 'num_users', None) is not None
+                    else defaults['num-users']
+                ),
+                'duration': (
+                    getattr(self.args, 'duration', None)
+                    if getattr(self.args, 'duration', None) is not None
+                    else defaults['duration']
+                ),
+                'gpu-mem-gb': (
+                    getattr(self.args, 'gpu_mem_gb', None)
+                    if getattr(self.args, 'gpu_mem_gb', None) is not None
+                    else defaults['gpu-mem-gb']
+                ),
+                'cpu-mem-gb': (
+                    getattr(self.args, 'cpu_mem_gb', None)
+                    if getattr(self.args, 'cpu_mem_gb', None) is not None
+                    else defaults['cpu-mem-gb']
+                ),
+                'max-concurrent-allocs': defaults['max-concurrent-allocs'],
+                'generation-mode': (
+                    getattr(self.args, 'generation_mode', None) or defaults['generation-mode']
+                ),
+            }
+        out = []
+        for key, value in params.items():
+            out.extend([f'--{key}', str(value)])
+        return out
 
     def _execute_datasize(self) -> int:
         """Calculate memory requirements for KV cache.
