@@ -5,6 +5,7 @@ This module defines the CLI arguments for the training benchmark,
 including datasize, datagen, run, and configview commands.
 """
 
+import argparse
 import sys
 
 from mlpstorage_py.config import (
@@ -21,6 +22,22 @@ from mlpstorage_py.cli.common_args import (
     add_dlio_arguments,
     add_timeseries_arguments,
 )
+
+
+def _positive_int(raw: str) -> int:
+    """argparse type: accept positive ints; reject 0, negative, and non-numeric.
+
+    Used by --drop-caches-timeout-seconds.  DLIO clamps to a minimum of 1
+    on its end too, but rejecting at the CLI boundary gives a clearer error
+    message than `subprocess.run(timeout=0)` would later.
+    """
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        raise argparse.ArgumentTypeError(f"expected positive integer, got {raw!r}")
+    if value < 1:
+        raise argparse.ArgumentTypeError(f"expected positive integer (>= 1), got {value}")
+    return value
 
 
 def add_training_arguments(parser, mode):
@@ -161,6 +178,26 @@ def _add_training_core_args(parser, command, accel_choices):
     )
 
     add_dlio_arguments(parser)
+
+    # Training `run` only: per-call timeout for DLIO's per-epoch page-cache
+    # flush.  Deployment knob (not a submission tunable), so it's exposed in
+    # every mode like --dlio-bin-path.  Plumbed through to DLIO via the
+    # DLIO_DROP_CACHES_TIMEOUT env var.  See mlcommons/storage #487.
+    if command == "run":
+        parser.add_argument(
+            '--drop-caches-timeout-seconds',
+            type=_positive_int,
+            default=None,
+            metavar='SECONDS',
+            help=(
+                "Per-call timeout for the per-epoch page-cache flush "
+                "(`sudo -n sh -c 'echo 3 > /proc/sys/vm/drop_caches'`). "
+                "Default is DLIO's built-in 30s.  Raise this on large-RAM "
+                "hosts where the kernel needs longer to drop caches "
+                "(e.g. 300).  Plumbed through to DLIO via the "
+                "DLIO_DROP_CACHES_TIMEOUT env var."
+            ),
+        )
 
     # --params is allowed in CLOSED mode for the parameters listed in
     # TrainingRunRulesChecker.CLOSED_ALLOWED_PARAMS (e.g. dataset.num_files_train,

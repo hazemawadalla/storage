@@ -623,7 +623,7 @@ class TestKVCacheRunIntegration:
         bm = self._make_bm(tmp_path, what_if=False)
 
         def fake_execute(cmd, **kwargs):
-            m = re.search(r'--base-output-dir\s+(\S+)', cmd)
+            m = re.search(r'--rank-output-base\s+(\S+)', cmd)
             if m:
                 trial_dir = m.group(1)
                 rank_dir = Path(trial_dir) / 'rank_0'

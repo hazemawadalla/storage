@@ -355,6 +355,11 @@ class DLIOBenchmark(Benchmark, abc.ABC):
                                                  self.args.oversubscribe, self.args.allow_run_as_root,
                                                  self.args.mpi_params, self.logger,
                                                  mpi_btl=getattr(self.args, 'mpi_btl', 'auto'))
+            # Forward DLIO_DROP_CACHES_TIMEOUT to ranks so multi-host runs honor
+            # the operator's CLI choice (mlcommons/storage #487).  OpenMPI does
+            # not forward arbitrary env vars by default; -x VAR opts VAR in.
+            if 'DLIO_DROP_CACHES_TIMEOUT' in os.environ:
+                mpi_prefix += " -x DLIO_DROP_CACHES_TIMEOUT"
             cmd = f"{mpi_prefix} {cmd}"
 
         return cmd
@@ -369,6 +374,13 @@ class TrainingBenchmark(DLIOBenchmark):
 
     def __init__(self, args, **kwargs):
         super().__init__(args, **kwargs)
+
+        # Plumb --drop-caches-timeout-seconds into DLIO via env var
+        # (mlcommons/storage #487).  Only the `run` subcommand registers the
+        # flag, so this is a no-op for datasize/datagen/configview.
+        timeout = getattr(args, 'drop_caches_timeout_seconds', None)
+        if timeout is not None:
+            os.environ['DLIO_DROP_CACHES_TIMEOUT'] = str(timeout)
 
         # This allows each command to map to a specific wrapper method. When methods are created, replace the default
         # 'self.execute_command' with the command-specific method (like "self._datasize()")

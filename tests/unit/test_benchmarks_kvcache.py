@@ -727,7 +727,7 @@ class TestExecuteRun:
     - _execute_command called 3 times per run (once per option) with trials=1 (DIST-02, DIST-04)
     - mpirun command contains '--mca orte_abort_on_non_zero_status 0' (DIST-08)
     - mpirun command contains '--npernode N' (DIST-03)
-    - wrapper receives --option, --seed, --base-output-dir, --cache-dir (DIST-07)
+    - wrapper receives --seed-base, --rank-output-base, --rank-cache-base (DIST-07)
     - per-option/trial dirs created with correct naming (option_{N}/trial_{T}/)
     - _interruptible_sleep called 2 times (after options 1 and 2; not after 3) (DIST-05)
     - _aggregate_option_results called 3 times when what_if=False
@@ -835,8 +835,13 @@ class TestExecuteRun:
         assert '--npernode 2' in executed_cmds[0], \
             f"Missing --npernode 2 in: {executed_cmds[0]}"
 
-    def test_wrapper_receives_option_seed_output_cache(self, bm, fake_agg_result):
-        """Wrapper command must include --option, --seed, --base-output-dir, --cache-dir (DIST-07)."""
+    def test_wrapper_receives_rank_bases_and_seed_base(self, bm, fake_agg_result):
+        """Wrapper command must include --rank-output-base, --rank-cache-base, --seed-base (DIST-07).
+
+        The wrapper API was reshaped for #498/#500: the wrapper no longer takes
+        --option and no longer encodes WORKLOAD_PARAMS. Per-option kv-cache.py
+        args are emitted by mlpstorage_py.benchmarks.kvcache and pass through
+        the wrapper via parse_known_args."""
         bm.args.trials = 1
         bm.args.inter_option_delay = 0
         bm.args.seed = 42
@@ -852,10 +857,11 @@ class TestExecuteRun:
              patch.object(bm, 'write_metadata'):
             bm._execute_run()
         cmd0 = executed_cmds[0]
-        assert '--option 1' in cmd0, f"Missing --option 1 in: {cmd0}"
-        assert '--seed 42' in cmd0, f"Missing --seed 42 in: {cmd0}"
-        assert '--base-output-dir' in cmd0, f"Missing --base-output-dir in: {cmd0}"
-        assert '--cache-dir /tmp/kv' in cmd0, f"Missing --cache-dir in: {cmd0}"
+        assert '--seed-base 42' in cmd0, f"Missing --seed-base 42 in: {cmd0}"
+        assert '--rank-output-base' in cmd0, f"Missing --rank-output-base in: {cmd0}"
+        assert '--rank-cache-base /tmp/kv' in cmd0, f"Missing --rank-cache-base in: {cmd0}"
+        # The legacy --option flag is no longer part of the wrapper API.
+        assert '--option ' not in cmd0, f"Stale --option flag in: {cmd0}"
 
     def test_per_option_trial_dirs_created(self, bm, fake_agg_result, tmp_path):
         """option_{N}/trial_{T}/ directories must be created."""
@@ -873,7 +879,7 @@ class TestExecuteRun:
         assert option1_trial0.exists(), f"Expected {option1_trial0} to exist"
 
     def test_option_trial_dirs_in_command_path(self, bm, fake_agg_result):
-        """Command must reference option_N/trial_T subdirectory in --base-output-dir."""
+        """Command must reference option_N/trial_T subdirectory in --rank-output-base."""
         bm.args.trials = 1
         bm.args.inter_option_delay = 0
         executed_cmds = []
@@ -1131,3 +1137,207 @@ class TestClosedEnforcement:
              patch.object(bm, 'write_metadata'):
             rc = bm._execute_run()
         assert rc == 0
+
+
+class TestWorkloadParamsConstant:
+    """WORKLOAD_PARAMS lives in mlpstorage_py.benchmarks.kvcache — the single
+    source of truth for per-option MLPerf v3.0 workloads. Previously it lived
+    in kv_cache_benchmark/mlperf_wrapper.py; centralizing it here is what
+    closes issues #498 and #500."""
+
+    def test_options_are_1_2_3(self):
+        from mlpstorage_py.benchmarks.kvcache import WORKLOAD_PARAMS
+        assert set(WORKLOAD_PARAMS.keys()) == {1, 2, 3}
+
+    def test_option1_model_is_8b(self):
+        from mlpstorage_py.benchmarks.kvcache import WORKLOAD_PARAMS
+        assert WORKLOAD_PARAMS[1]['model'] == 'llama3.1-8b'
+
+    def test_option3_model_is_70b(self):
+        from mlpstorage_py.benchmarks.kvcache import WORKLOAD_PARAMS
+        assert WORKLOAD_PARAMS[3]['model'] == 'llama3.1-70b-instruct'
+
+    def test_generation_mode_always_none(self):
+        from mlpstorage_py.benchmarks.kvcache import WORKLOAD_PARAMS
+        for opt in (1, 2, 3):
+            assert WORKLOAD_PARAMS[opt]['generation-mode'] == 'none'
+
+
+class TestBuildOptionKvcacheArgs:
+    """Per-option kv-cache.py CLI args returned by _build_option_kvcache_args.
+
+    Verifies CLOSED uses the mandated WORKLOAD_PARAMS verbatim and OPEN lets
+    user-set CLI flags supersede the per-option defaults — the behavior the
+    old in-wrapper squashing prevented (issues #498 and #500)."""
+
+    def test_closed_emits_workload_params_verbatim_for_option1(self, tmp_path):
+        from mlpstorage_py.benchmarks.kvcache import WORKLOAD_PARAMS
+        bm = _make_run_benchmark(tmp_path)
+        # Even if args carry non-default values, CLOSED ignores them.
+        bm.args.model = 'llama3.1-70b-instruct'
+        bm.args.num_users = 999
+        out = bm._build_option_kvcache_args(1, is_closed=True)
+        assert '--model' in out and out[out.index('--model') + 1] == WORKLOAD_PARAMS[1]['model']
+        assert '--num-users' in out and out[out.index('--num-users') + 1] == str(WORKLOAD_PARAMS[1]['num-users'])
+
+    def test_closed_emits_option3_70b_model(self, tmp_path):
+        bm = _make_run_benchmark(tmp_path)
+        out = bm._build_option_kvcache_args(3, is_closed=True)
+        assert out[out.index('--model') + 1] == 'llama3.1-70b-instruct'
+
+    def test_open_user_args_override_defaults(self, tmp_path):
+        """Issue #498: in OPEN, user CLI args must reach kv-cache.py."""
+        bm = _make_run_benchmark(tmp_path)
+        bm.args.model = 'llama3.1-70b-instruct'
+        bm.args.num_users = 42
+        bm.args.duration = 600
+        bm.args.gpu_mem_gb = 8
+        bm.args.cpu_mem_gb = 16
+        bm.args.generation_mode = 'realistic'
+        out = bm._build_option_kvcache_args(1, is_closed=False)
+        assert out[out.index('--model') + 1] == 'llama3.1-70b-instruct'
+        assert out[out.index('--num-users') + 1] == '42'
+        assert out[out.index('--duration') + 1] == '600'
+        assert out[out.index('--gpu-mem-gb') + 1] == '8'
+        assert out[out.index('--cpu-mem-gb') + 1] == '16'
+        assert out[out.index('--generation-mode') + 1] == 'realistic'
+
+    def test_open_falls_back_to_workload_params_when_args_missing(self, tmp_path):
+        """In OPEN, attributes the user did not set come from WORKLOAD_PARAMS."""
+        from mlpstorage_py.benchmarks.kvcache import WORKLOAD_PARAMS
+        bm = _make_run_benchmark(tmp_path)
+        for attr in ('model', 'num_users', 'duration', 'gpu_mem_gb',
+                     'cpu_mem_gb', 'generation_mode'):
+            if hasattr(bm.args, attr):
+                delattr(bm.args, attr)
+        out = bm._build_option_kvcache_args(2, is_closed=False)
+        assert out[out.index('--model') + 1] == WORKLOAD_PARAMS[2]['model']
+        assert out[out.index('--num-users') + 1] == str(WORKLOAD_PARAMS[2]['num-users'])
+        assert out[out.index('--cpu-mem-gb') + 1] == str(WORKLOAD_PARAMS[2]['cpu-mem-gb'])
+
+    def test_max_concurrent_allocs_always_from_workload_params(self, tmp_path):
+        """max-concurrent-allocs is not user-exposed even in OPEN — it
+        always tracks the per-option WORKLOAD_PARAMS value."""
+        from mlpstorage_py.benchmarks.kvcache import WORKLOAD_PARAMS
+        bm = _make_run_benchmark(tmp_path)
+        out_open = bm._build_option_kvcache_args(3, is_closed=False)
+        out_closed = bm._build_option_kvcache_args(3, is_closed=True)
+        expected = str(WORKLOAD_PARAMS[3]['max-concurrent-allocs'])
+        assert out_open[out_open.index('--max-concurrent-allocs') + 1] == expected
+        assert out_closed[out_closed.index('--max-concurrent-allocs') + 1] == expected
+
+
+class TestWrapperCommandForwardsPerOptionArgs:
+    """End-to-end check that the wrapper invocation built by _execute_run
+    contains the per-option model/num-users/etc., so kv-cache.py receives
+    them downstream of mlperf_wrapper.py."""
+
+    def _capture_first_cmd(self, bm, fake_agg_result):
+        executed = []
+        def fake_execute(cmd, **kwargs):
+            executed.append(cmd)
+            return ('', '', 0)
+        with patch.object(bm, '_execute_command', side_effect=fake_execute), \
+             patch.object(bm, '_interruptible_sleep'), \
+             patch.object(bm, '_aggregate_option_results', return_value=fake_agg_result), \
+             patch.object(bm, '_write_run_summary'), \
+             patch.object(bm, 'write_metadata'):
+            bm._execute_run()
+        return executed[0]
+
+    def _fake_agg(self):
+        return {
+            'option': 1, 'aggregated_read_bandwidth_gbps': 0.0,
+            'aggregated_write_bandwidth_gbps': 0.0,
+            'aggregated_avg_throughput_tokens_per_sec': 0.0,
+            'aggregated_storage_throughput_tokens_per_sec': 0.0,
+            'aggregated_p95_latency_ms': 0.0,
+            'rank_count': 1, 'trial_count': 1,
+            'partial_failure': False, 'missing_files': [], 'cpu_tier_ranks': [],
+        }
+
+    def test_closed_option1_wrapper_cmd_contains_8b_model(self, tmp_path):
+        bm = _make_run_benchmark(tmp_path)
+        bm.args.mode = 'closed'
+        # CLOSED requires trials=3 and inter_option_delay=20 (the fixture's
+        # values); overriding them would trigger CLOSED enforcement and
+        # short-circuit before any command is built.
+        cmd0 = self._capture_first_cmd(bm, self._fake_agg())
+        assert '--model llama3.1-8b' in cmd0
+        assert '--num-users 200' in cmd0
+        assert '--max-concurrent-allocs 16' in cmd0
+
+    def test_open_user_model_appears_in_wrapper_cmd(self, tmp_path):
+        """Issue #498: user --model must reach the wrapper-built command."""
+        bm = _make_run_benchmark(tmp_path)
+        bm.args.mode = 'open'
+        bm.args.model = 'llama3.1-70b-instruct'
+        bm.args.num_users = 33
+        bm.args.trials = 1
+        bm.args.inter_option_delay = 0
+        cmd0 = self._capture_first_cmd(bm, self._fake_agg())
+        assert '--model llama3.1-70b-instruct' in cmd0
+        assert '--num-users 33' in cmd0
+
+    def test_wrapper_cmd_contains_config_path(self, tmp_path):
+        """mlpstorage now owns the config path; it must be passed to the wrapper."""
+        bm = _make_run_benchmark(tmp_path)
+        bm.args.trials = 1
+        bm.args.inter_option_delay = 0
+        cmd0 = self._capture_first_cmd(bm, self._fake_agg())
+        assert '--config' in cmd0
+
+    def _capture_all_cmds(self, bm, fake_agg_result):
+        """Capture every per-option/per-trial wrapper command built by _execute_run."""
+        executed = []
+        def fake_execute(cmd, **kwargs):
+            executed.append(cmd)
+            return ('', '', 0)
+        with patch.object(bm, '_execute_command', side_effect=fake_execute), \
+             patch.object(bm, '_interruptible_sleep'), \
+             patch.object(bm, '_aggregate_option_results', return_value=fake_agg_result), \
+             patch.object(bm, '_write_run_summary'), \
+             patch.object(bm, 'write_metadata'):
+            bm._execute_run()
+        return executed
+
+    def test_open_option3_defaults_to_70b_when_user_did_not_override(self, tmp_path):
+        """OPEN with no --model override: option 3 must still receive the
+        MLPerf-mandated llama70b model from WORKLOAD_PARAMS[3]. Closes the
+        gap between _build_option_kvcache_args (covered) and the actual
+        wrapper command (was uncovered)."""
+        bm = _make_run_benchmark(tmp_path)
+        bm.args.mode = 'open'
+        bm.args.trials = 1
+        bm.args.inter_option_delay = 0
+        # Remove the fixture's model/num-users defaults so the fallback path
+        # in _build_option_kvcache_args is exercised — this mirrors the case
+        # where the OPEN user invoked the run without those flags.
+        for attr in ('model', 'num_users'):
+            if hasattr(bm.args, attr):
+                delattr(bm.args, attr)
+        cmds = self._capture_all_cmds(bm, self._fake_agg())
+        assert len(cmds) == 3, f"Expected 3 commands (one per option), got {len(cmds)}"
+        # cmds[0] is option 1, cmds[1] is option 2, cmds[2] is option 3
+        assert '--model llama3.1-8b' in cmds[0]
+        assert '--num-users 200' in cmds[0]
+        assert '--model llama3.1-8b' in cmds[1]
+        assert '--num-users 100' in cmds[1]
+        assert '--model llama3.1-70b-instruct' in cmds[2]
+        assert '--num-users 70' in cmds[2]
+
+    def test_open_user_config_path_supersedes_wrapper_default(self, tmp_path):
+        """OPEN: when the user provides --config /custom/path.yaml, mlpstorage
+        forwards that exact path to the wrapper instead of the kv-cache.py
+        adjacent default. (CLOSED rejects --config — covered separately.)"""
+        bm = _make_run_benchmark(tmp_path)
+        bm.args.mode = 'open'
+        bm.args.config = '/custom/path/user.yaml'
+        bm.args.trials = 1
+        bm.args.inter_option_delay = 0
+        cmd0 = self._capture_first_cmd(bm, self._fake_agg())
+        assert '--config /custom/path/user.yaml' in cmd0, \
+            f"User config path missing from cmd: {cmd0}"
+        # And the wrapper-adjacent default must NOT also be present.
+        assert 'kv_cache_benchmark/config.yaml' not in cmd0, \
+            f"Default config path leaked into cmd alongside user override: {cmd0}"

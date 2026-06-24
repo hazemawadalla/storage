@@ -237,7 +237,7 @@ wheels = [
 [[package]]
 name = "dlio-benchmark"
 version = "3.0.2"
-source = { git = "https://github.com/mlcommons/DLIO_local_changes.git?rev=7098cccdb1fe35ab6487705f33f229e3c125dd44#7098cccdb1fe35ab6487705f33f229e3c125dd44" }
+source = { git = "https://github.com/mlcommons/DLIO_local_changes.git?branch=main#3667ed11e7ad36ca2c5def65c6cf2ae0559ec9f6" }
 dependencies = [
     { name = "dgen-py", marker = "sys_platform == 'linux'" },
     { name = "h5py", marker = "sys_platform == 'linux'" },
@@ -518,7 +518,7 @@ wheels = [
 
 [[package]]
 name = "mlpstorage"
-version = "3.0.16"
+version = "3.0.17"
 source = { editable = "." }
 dependencies = [
     { name = "dlio-benchmark", marker = "sys_platform == 'linux'" },
@@ -583,8 +583,8 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "dlio-benchmark", git = "https://github.com/mlcommons/DLIO_local_changes.git?rev=7098cccdb1fe35ab6487705f33f229e3c125dd44" },
-    { name = "dlio-benchmark", marker = "extra == 'full'", git = "https://github.com/mlcommons/DLIO_local_changes.git?rev=7098cccdb1fe35ab6487705f33f229e3c125dd44" },
+    { name = "dlio-benchmark", git = "https://github.com/mlcommons/DLIO_local_changes.git?branch=main" },
+    { name = "dlio-benchmark", marker = "extra == 'full'", git = "https://github.com/mlcommons/DLIO_local_changes.git?branch=main" },
     { name = "elasticsearch", marker = "extra == 'vectordb'", specifier = ">=8.0" },
     { name = "elasticsearch", marker = "extra == 'vectordb-elasticsearch'", specifier = ">=8.0" },
     { name = "minio", specifier = ">=7.2.20" },
