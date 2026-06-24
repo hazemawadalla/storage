@@ -908,12 +908,15 @@ class Benchmark(BenchmarkInterface, abc.ABC):
         self.verification = self.benchmark_run_verifier.verify()
         self.logger.verboser(f'Benchmark verification result: {self.verification}')
 
-        # Use getattr so we're resilient to args objects built in tests that
-        # may not define one or both attributes. Neither flag set => warn and
-        # skip formal verification (fixes #349: --open was previously
-        # indistinguishable from "nothing passed").
-        closed_mode = getattr(self.args, 'closed', False)
-        open_mode = getattr(self.args, 'open', False)
+        # Source of truth is ``args.mode`` (post-PR #412 modal CLI:
+        # closed|open|whatif as the first positional). The legacy bool
+        # pair ``args.closed``/``args.open`` is kept as a fallback so
+        # pre-#412 test fixtures and any external callers building
+        # Namespaces by hand still work — fixes regression where the
+        # #349 dispatch was never migrated to the new mode string.
+        mode = getattr(self.args, 'mode', None)
+        closed_mode = (mode == 'closed') or getattr(self.args, 'closed', False)
+        open_mode = (mode == 'open') or getattr(self.args, 'open', False)
 
         if not closed_mode and not open_mode:
             self.logger.warning(f'Running the benchmark without verification for open or closed configurations. These results are not valid for submission. Use closed or open as the first positional argument to specify a configuration.')
