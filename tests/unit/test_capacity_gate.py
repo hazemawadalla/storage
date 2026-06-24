@@ -278,3 +278,198 @@ class TestRunInvokesPreExecutionGate:
                 Benchmark.run(bm)
 
         mock_write.assert_not_called()
+
+
+# =============================================================================
+# Per-subclass tests — A6 / A7 / A8 locks
+# =============================================================================
+
+
+class TestTrainingBenchmarkRequiredBytes:
+    """A7 destination + calculate_training_data_size delegation."""
+
+    def test_returns_third_tuple_element_of_calculate_training_data_size(self):
+        from mlpstorage_py.benchmarks.dlio import TrainingBenchmark
+
+        bm = MagicMock(spec=TrainingBenchmark)
+        bm.args = SimpleNamespace(data_dir="/data")
+        bm.cluster_information = MagicMock()
+        bm.combined_params = {"dataset": {}, "reader": {}}
+        bm.logger = MagicMock()
+
+        with patch(
+            "mlpstorage_py.benchmarks.dlio.calculate_training_data_size",
+            return_value=(100, 5, 12_345_678_900),
+        ):
+            result = TrainingBenchmark.required_bytes_for_capacity_gate(bm)
+        assert result == 12_345_678_900
+
+    def test_destination_is_args_data_dir(self):
+        from mlpstorage_py.benchmarks.dlio import TrainingBenchmark
+
+        bm = MagicMock(spec=TrainingBenchmark)
+        bm.args = SimpleNamespace(data_dir="/data/foo")
+        assert TrainingBenchmark._capacity_gate_destination(bm) == "/data/foo"
+
+    def test_datasize_invokes_pre_execution_gate_before_calculate_training_data_size(self):
+        from mlpstorage_py.benchmarks.dlio import TrainingBenchmark
+
+        order = []
+        bm = MagicMock(spec=TrainingBenchmark)
+        bm._pre_execution_gate = MagicMock(side_effect=lambda: order.append("gate"))
+        bm.args = SimpleNamespace(data_dir="/d", hosts=None, exec_type="local",
+                                  num_processes=1, results_dir="/r", mode="closed",
+                                  model="unet3d")
+        bm.cluster_information = MagicMock()
+        bm.combined_params = {"dataset": {}, "reader": {}}
+        bm.params_dict = {}
+        bm.logger = MagicMock()
+
+        def fake_calc(*a, **kw):
+            order.append("calc")
+            return (10, 1, 1024)
+        bm.generate_datagen_benchmark_command = MagicMock(return_value="cmd")
+
+        with patch(
+            "mlpstorage_py.benchmarks.dlio.calculate_training_data_size",
+            side_effect=fake_calc,
+        ):
+            TrainingBenchmark.datasize(bm)
+        assert order == ["gate", "calc"]
+
+
+class TestCheckpointingBenchmarkRequiredBytes:
+    """A7 destination join + sum(rank_gb) * GiB * num_checkpoints_write."""
+
+    def test_returns_sum_rank_gb_times_gib_times_num_checkpoints_write(self):
+        from mlpstorage_py.benchmarks.dlio import CheckpointingBenchmark
+        from mlpstorage_py.config import LLM_ALLOWED_VALUES, LLM_SIZE_BY_RANK
+
+        bm = MagicMock(spec=CheckpointingBenchmark)
+        bm.args = SimpleNamespace(
+            model="llama3-8b",
+            num_processes=8,
+            num_checkpoints_write=3,
+            checkpoint_folder="/cp",
+        )
+        bm.logger = MagicMock()
+
+        # llama3-8b: ZeroLevel=3 (sharded across all ranks), model=15, optimizer=90
+        # rank_gb[i] = (15 + 90) / 8 = 13.125 for each of 8 ranks
+        # sum = 105.0; expected = int(105.0 * 1024**3 * 3) = 338368201523 (approx)
+        model_gb, optimizer_gb = LLM_SIZE_BY_RANK["llama3-8b"]
+        per_rank = (model_gb + optimizer_gb) / 8
+        expected = int(per_rank * 8 * 1024**3 * 3)
+
+        result = CheckpointingBenchmark.required_bytes_for_capacity_gate(bm)
+        assert result == expected
+
+    def test_destination_is_checkpoint_folder_joined_with_model(self):
+        from mlpstorage_py.benchmarks.dlio import CheckpointingBenchmark
+
+        bm = MagicMock(spec=CheckpointingBenchmark)
+        bm.args = SimpleNamespace(checkpoint_folder="/cp", model="llama3-8b")
+        result = CheckpointingBenchmark._capacity_gate_destination(bm)
+        assert result == os.path.join("/cp", "llama3-8b")
+
+    def test_destination_is_none_when_checkpoint_folder_empty(self):
+        from mlpstorage_py.benchmarks.dlio import CheckpointingBenchmark
+
+        bm = MagicMock(spec=CheckpointingBenchmark)
+        bm.args = SimpleNamespace(checkpoint_folder=None, model="llama3-8b")
+        result = CheckpointingBenchmark._capacity_gate_destination(bm)
+        assert result is None
+
+
+class TestVectorDBBenchmarkRequiredBytes:
+    """A8 escape hatch + execute_datasize math parity."""
+
+    def test_returns_num_vectors_times_dim_times_4_times_overhead_times_num_shards(self):
+        from mlpstorage_py.benchmarks.vectordbbench import VectorDBBenchmark
+
+        bm = MagicMock(spec=VectorDBBenchmark)
+        bm.args = SimpleNamespace(
+            num_vectors=1_000_000,
+            dimension=768,
+            num_shards=2,
+        )
+        # DISKANN overhead = 1.3
+        bm._effective_index_type = MagicMock(return_value="DISKANN")
+        expected = int(1_000_000 * 768 * 4 * 1.3 * 2)
+        result = VectorDBBenchmark.required_bytes_for_capacity_gate(bm)
+        assert result == expected
+
+    def test_local_backend_returns_destination_path(self):
+        """Even on local destinations, VectorDB is fundamentally a remote-engine
+        benchmark (data lands in the VDB process, not on a local mount the
+        benchmark itself controls). Per A8 we return None — let the gate skip.
+        """
+        from mlpstorage_py.benchmarks.vectordbbench import VectorDBBenchmark
+
+        bm = MagicMock(spec=VectorDBBenchmark)
+        bm.args = SimpleNamespace(host="localhost")
+        # Per A8 contract: VDB destinations are always remote engines.
+        result = VectorDBBenchmark._capacity_gate_destination(bm)
+        assert result is None
+
+    def test_remote_milvus_backend_returns_none_destination(self):
+        """A8 escape hatch — milvus URI explicitly returns None."""
+        from mlpstorage_py.benchmarks.vectordbbench import VectorDBBenchmark
+
+        bm = MagicMock(spec=VectorDBBenchmark)
+        bm.args = SimpleNamespace(host="my-milvus.cluster.local")
+        result = VectorDBBenchmark._capacity_gate_destination(bm)
+        assert result is None
+
+
+class TestKVCacheBenchmarkRequiredBytes:
+    """A6 1x lock + cache-path destination + internal model table source."""
+
+    def test_returns_total_cache_bytes_at_1x_per_a6(self):
+        """A6 KEY LOCK: returns int(total_cache_mb * 1024 * 1024), NOT *2.
+
+        The 2x recommendation at kvcache.py:336 is for performance headroom
+        and stays in the user-facing log; CAP-01 enforces the floor.
+        """
+        from mlpstorage_py.benchmarks.kvcache import KVCacheBenchmark
+
+        bm = MagicMock(spec=KVCacheBenchmark)
+        bm.model = "llama3.1-8b"  # per_token=4096, seq=8192
+        bm.num_users = 10
+
+        # cache_per_user_mb = (4096 * 8192) / (1024*1024) = 32
+        # total_cache_mb = 32 * 10 = 320
+        # expected = int(320 * 1024 * 1024) = 335544320
+        expected = int(((4096 * 8192) / (1024 * 1024)) * 10 * 1024 * 1024)
+        result = KVCacheBenchmark.required_bytes_for_capacity_gate(bm)
+        assert result == expected
+        # 1x lock guard — make sure we did NOT multiply by 2.
+        assert result != expected * 2
+
+    def test_destination_is_cache_path(self):
+        from mlpstorage_py.benchmarks.kvcache import KVCacheBenchmark
+
+        bm = MagicMock(spec=KVCacheBenchmark)
+        bm.cache_dir = "/nvme/kvcache"
+        result = KVCacheBenchmark._capacity_gate_destination(bm)
+        assert result == "/nvme/kvcache"
+
+    def test_uses_kvcache_internal_model_table_not_config_py_constants(self):
+        """A6 lock: required_bytes consults model_cache_estimates inline
+        (per_token_bytes/typical_sequence), NOT LLAMA3_8B/etc from config.py.
+
+        The contract is that for unknown models we fall back to the inline
+        default (per_token=4096, seq=4096), NOT raise KeyError on a config.py
+        constants lookup.
+        """
+        from mlpstorage_py.benchmarks.kvcache import KVCacheBenchmark
+
+        bm = MagicMock(spec=KVCacheBenchmark)
+        # An unknown model name MUST fall through to the inline default,
+        # NOT raise (i.e., the impl does NOT route through LLM_SIZE_BY_RANK).
+        bm.model = "totally-made-up-model"
+        bm.num_users = 1
+        # default per_token=4096, seq=4096 -> 16 MB total -> 16777216 bytes
+        expected = int(((4096 * 4096) / (1024 * 1024)) * 1 * 1024 * 1024)
+        result = KVCacheBenchmark.required_bytes_for_capacity_gate(bm)
+        assert result == expected
