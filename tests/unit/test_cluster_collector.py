@@ -2856,6 +2856,76 @@ class TestEnvironmentCollector:
         assert out == []
 
 
+class TestEnvironmentRuntimeDenylist:
+    """OMPI_ is in the allowlist (correct — captures stable MPI config like
+    OMPI_COMM_WORLD_SIZE, OMPI_MCA_btl). But a sub-set of OMPI_ vars
+    contain per-run launcher metadata (PIDs, TCP sockets, jobids, crypto
+    tokens, session dirs, command-line strings) that change on EVERY
+    mpirun invocation. Without a denylist for these, the fingerprint
+    captured in systemname.yaml differs from any subsequent re-run's
+    fingerprint, so SystemDriftError fires for every legitimate operator
+    re-run — making LIFE-04 hand-fill survival unverifiable on real
+    runs.
+
+    Surfaced during Phase 5 UAT Test 3 (LIFE-04 hand-fill flow):
+    diff hunks at fingerprint positions 282, 296, 302, 318, 320, 324, 328
+    showed the on-disk fingerprint differed from the recomputed one in
+    OMPI_ARGV, OMPI_FILE_LOCATION, OMPI_MCA_ess_base_jobid,
+    OMPI_MCA_orte_hnp_uri, OMPI_MCA_orte_jobfam_session_dir,
+    OMPI_MCA_orte_local_daemon_uri, OMPI_MCA_orte_precondition_transports.
+
+    Phase 5.1 (.planning/todos/pending/phase-5.1-env-sysctl-fingerprint-audit.md)
+    will broaden this to other launchers (PMI/SLURM/PALS/HYDRA/PBS/LSF).
+    """
+
+    _RUNTIME_VOLATILE_OMPI_VARS = [
+        "OMPI_ARGV",
+        "OMPI_FILE_LOCATION",
+        "OMPI_MCA_ess_base_jobid",
+        "OMPI_MCA_orte_hnp_uri",
+        "OMPI_MCA_orte_jobfam_session_dir",
+        "OMPI_MCA_orte_local_daemon_uri",
+        "OMPI_MCA_orte_precondition_transports",
+    ]
+
+    @pytest.mark.parametrize("varname", _RUNTIME_VOLATILE_OMPI_VARS)
+    def test_runtime_volatile_ompi_var_excluded(self, monkeypatch, varname):
+        """Each volatile OMPI var must NOT appear in collect_environment output
+        even when set in os.environ (which is the live state inside any
+        mpirun'd benchmark process)."""
+        from mlpstorage_py.cluster_collector import collect_environment
+
+        _clear_env_allowlist_vars(monkeypatch)
+        monkeypatch.setenv(varname, "some-per-run-value-12345")
+        out = collect_environment()
+        names = {e["name"] for e in out}
+        assert varname not in names, (
+            f"{varname} is a runtime-volatile OMPI launcher variable and must "
+            f"be excluded from the fingerprint to prevent spurious "
+            f"SystemDriftError on every re-run."
+        )
+
+    def test_stable_ompi_vars_still_captured(self, monkeypatch):
+        """The denylist must NOT remove the STABLE OMPI vars that describe
+        the actual MPI configuration (rank counts, oversubscribe policy,
+        binding policy). These ARE part of legitimate client identity."""
+        from mlpstorage_py.cluster_collector import collect_environment
+
+        _clear_env_allowlist_vars(monkeypatch)
+        # Set both a volatile + a stable var; assert only the stable one
+        # survives.
+        monkeypatch.setenv("OMPI_MCA_ess_base_jobid", "2108096513")
+        monkeypatch.setenv("OMPI_COMM_WORLD_SIZE", "8")
+        monkeypatch.setenv("OMPI_MCA_mpi_oversubscribe", "0")
+        monkeypatch.setenv("OMPI_MCA_hwloc_base_binding_policy", "core")
+        out = collect_environment()
+        names = {e["name"] for e in out}
+        assert "OMPI_MCA_ess_base_jobid" not in names
+        assert "OMPI_COMM_WORLD_SIZE" in names
+        assert "OMPI_MCA_mpi_oversubscribe" in names
+        assert "OMPI_MCA_hwloc_base_binding_policy" in names
+
+
 class TestEnvironmentMPIScriptParity:
     """Pattern B (D-36): collect_environment + _env_allowlist_match +
     _mask_credential_id + _redact_secret live inline in MPI_COLLECTOR_SCRIPT.
