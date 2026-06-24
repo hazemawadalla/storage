@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: "Phase 5 Plan 04 (CAP-02 shared-FS probe) complete — SHARED_FS_PROBE_SCRIPT untyped MPI heredoc + run_shared_fs_probe launcher + Benchmark._run_uuid per-instance UUID + _pre_execution_gate CAP-02 wiring; 22 new unit tests (8 classes, B-3 in-process exec + W-1 tight grep + W-5 launcher pass-through) + 381 Phase 2/3/4/5 regression tests green"
-last_updated: "2026-06-24T05:15:08Z"
-last_activity: 2026-06-24 -- Phase 05 Plan 04 (CAP-02 shared-FS probe) complete
+stopped_at: "Phase 5 Plan 05 (integration tests) complete — 3 new test classes (TestPhase5Lifecycle, TestPhase5Cap01, TestPhase5Cap02) appended to test_systemname_yaml_end_to_end.py (25 new tests covering all 8 ROADMAP SC + LIFE-04 hand-fill survival + main.py top-level MLPStorageException dispatch) + new tests/integration/test_shared_fs_probe_real_mpi.py (3 tests, real-mpirun B-3 Option A coverage with skip-if-no-mpirun discipline). Full Phase 5 regression suite: 572 passed, 3 skipped (real-MPI tests on dev env without mpi4py). Phase 5 vertical end-to-end COMPLETE — ready for /gsd-verify-phase 05."
+last_updated: "2026-06-24T05:40:00Z"
+last_activity: 2026-06-24 -- Phase 05 Plan 05 (integration tests) complete; Phase 5 vertical end-to-end COMPLETE
 progress:
   total_phases: 5
   completed_phases: 4
   total_plans: 26
-  completed_plans: 25
-  percent: 96
+  completed_plans: 26
+  percent: 100
 ---
 
 # Project State
@@ -25,15 +25,16 @@ See: .planning/PROJECT.md (updated 2026-06-18)
 
 ## Current Position
 
-Phase: 05 (logical-diff-lifecycle-capacity-gate) — EXECUTING
-Plan: 5 of 5 (05-01 diff core + 05-02 LIFE-02/03/04 wiring + 05-03 CAP-01 capacity gate + 05-04 CAP-02 shared-FS probe all complete; 05-05 integration tests still ahead)
-Status: Ready to execute
-Last activity: 2026-06-24 -- Phase 05 Plan 04 (CAP-02 shared-FS probe) complete
+Phase: 05 (logical-diff-lifecycle-capacity-gate) — EXECUTING → ready for /gsd-verify-phase 05
+Plan: 5 of 5 COMPLETE (05-01 diff core + 05-02 LIFE-02/03/04 wiring + 05-03 CAP-01 capacity gate + 05-04 CAP-02 shared-FS probe + 05-05 integration tests all complete)
+Status: All 5 plans executed; awaiting verification
+Last activity: 2026-06-24 -- Phase 05 Plan 05 (integration tests) complete; Phase 5 vertical end-to-end COMPLETE
 
 Progress (Phase 1): [██████████] 100%
 Progress (Phase 2): [██████████] 100% (6/6 plans complete; verification 7/7 passed; UAT 4/4 passed)
 Progress (Phase 3): [██████████] 100% (5/5 plans complete; Plan 03-01 schema extension + Plan 03-02 chassis collector + Plan 03-03 networking collector + Plan 03-04 transform-layer extensions + Plan 03-05 HostInfo + node_dict_from_host wire-through end-to-end all green)
 Progress (Phase 4): [██████████] 100% (5/5 plans complete; Plan 04-01 sysctl collector + Plan 04-02 environment collector + unified redactors + Plan 04-03 drives collector via lsblk -J -b + Plan 04-04 transform-layer 3 signatures + generalized dispatch + D-33 splice + Plan 04-05 HostInfo + node_dict_from_host wire-through end-to-end all green; Phase 4 vertical end-to-end COMPLETE)
+Progress (Phase 5): [██████████] 100% (5/5 plans complete; Plan 05-01 pure-function diff core + Plan 05-02 LIFE-02/03/04 wiring (SystemDriftError + SystemDescriptionParseError + load-diff-raise branch) + Plan 05-03 CAP-01 disk-space gate + Plan 05-04 CAP-02 shared-FS probe (SHARED_FS_PROBE_SCRIPT heredoc + run_shared_fs_probe launcher + Benchmark._run_uuid) + Plan 05-05 integration test harness (TestPhase5Lifecycle + TestPhase5Cap01 + TestPhase5Cap02 + TestSharedFsProbeRealMpi) all green; 572 regression tests pass, 3 skipped on real-mpi-without-mpi4py dev env; Phase 5 vertical end-to-end COMPLETE)
 
 ## Performance Metrics
 
@@ -63,6 +64,7 @@ Progress (Phase 4): [██████████] 100% (5/5 plans complete; P
 | Phase 05 P03 | 8 | 2 tasks | 6 files (2 created + 4 modified) |
 | Phase 05 P02 | 12 | 2 tasks | 4 files (1 created + 3 modified) |
 | Phase 05 P04 | 12 | 2 tasks | 4 files (1 created + 3 modified) |
+| Phase 05 P05 | 18 | 2 tasks | 2 files (1 created + 1 modified) |
 
 ## Accumulated Context
 
@@ -175,6 +177,11 @@ Recent decisions affecting current work:
 - Execute 05-02 deviation (Rule 3 - Blocking Issue): top-level `from mlpstorage_py.system_description.diff import ...` in auto_generator.py creates a circular import edge with diff.py's `from mlpstorage_py.system_description.auto_generator import _FINGERPRINT_KEYS, _resolve_fingerprint_key` (the D-38 single source of truth locked in Slice-1 SUMMARY). Fix: move the diff import INSIDE write_systemname_yaml's FileExistsError branch as a lazy import. Added module-level docstring note recording the rationale so future readers don't optimize it back. Functionally identical at runtime (sys.modules caches the import after first call; branch only entered after module fully loaded). Folded into the Task-2 GREEN commit (4cd9e3d).
 - Execute 05-02 deviation (Rule 3 - Blocking Issue): three Phase-2 tests in test_auto_generator_write.py encoded the obsolete `FileExistsError → return None unconditionally` contract — `test_no_op_if_exists` wrote garbage content expecting no-op (now raises SystemDescriptionParseError); `test_concurrent_writers_one_wins` expected pure FileExistsError no-op on loser (now loser hits LIFE-04 no-touch); `test_symlink_attack_at_target_path_returns_none` expected None (now raises SystemDescriptionParseError because the symlink target `"innocent"` is not valid YAML). Updated all three to match Phase-5 semantics while preserving original security/correctness intent (file-not-overwritten, single-winner race, symlink-target-not-overwritten). T-2-08 security guarantee explicitly re-asserted via `assert innocent.read_text() == "innocent"` after the raise. Folded into the Task-2 GREEN commit (4cd9e3d).
 - Execute 05-02 process: NO `git stash` used. Four-commit RED/GREEN cadence preserved per task: a180d13 (Task-1 RED) → 914063b (Task-1 GREEN) → 6d202a2 (Task-2 RED) → 4cd9e3d (Task-2 GREEN). Both Rule-3 fixes (lazy import + stale-test rewrites) folded into the same commit as the production change that requires them — same convention as Phase 4-02/04-03/04-04/05-03. The B-5 stub-splice symmetry copy implemented exactly per PLAN as `_splice_stub_lists(_build_outer_dict(copy.deepcopy(stanzas)))` and verified via `grep -Pzo` source-lock.
+- Execute 05-05 (integration tests): 3 new test classes (TestPhase5Lifecycle, TestPhase5Cap01, TestPhase5Cap02) appended to tests/integration/test_systemname_yaml_end_to_end.py + new tests/integration/test_shared_fs_probe_real_mpi.py. Pure test-layer addition — zero production-code changes. Patch-at-the-leaf pattern: integration tests mock os.statvfs (CAP-01 leaf), run_shared_fs_probe (CAP-02 launcher), and _pre_execution_gate (LIFE focus). Bidirectional SC#4 per-mode independence locked per checker W-3 (closed→open AND open→closed). main.py top-level dispatch tested by simulating the exception-handler wrap (full main() argv plumbing would dwarf the test signal); the load-bearing contract — SystemDriftError IS-A MLPStorageException → catch-all → EXIT_CODE.FAILURE — is what's locked. SC#1 LIFE-04 hand-fill survival test scoped to scalar SER-02 blanks (where Pitfall 3(a) applies) rather than stub-list fields like networking[].traffic (which round-trip via _splice_stub_lists symmetry regardless of user value).
+- Execute 05-05 deviation (Rule 3 - Blocking Issue): CAP-02 tests needed _make_benchmark_with_local_destination helper that overrides VectorDBBenchmark's A8 None-destination escape hatch — otherwise _pre_execution_gate returns BEFORE invoking run_shared_fs_probe and the launcher mock never fires. The A8 production behavior is locked separately by test_remote_vdb_backend_skips_cap01_with_log_a8 in TestPhase5Cap01.
+- Execute 05-05 deviation (Rule 3 - Blocking Issue): KVCache MagicMock(spec=KVCacheBenchmark) breaks class-attribute lookups — bind real _MODEL_CACHE_ESTIMATES + _MODEL_CACHE_DEFAULT to the mock instance before invoking required_bytes_for_capacity_gate. Same pattern as 05-03 KVCache fixture. Folded into Task 1 commit (1def795).
+- Execute 05-05 deviation (Rule 3 - Blocking Issue): real-mpirun tests need skipif(not mpi4py_importable) in addition to skipif(not shutil.which('mpirun')) — on systems with mpirun-but-no-mpi4py the original plan tests would run the script and hit the Pitfall 8 ImportError path (exit 1 with _mpi_import_error marker), which is NOT what B-3 Option A success locks. Adding the mpi4py skip honors the project's "UAT defer pattern for hardware" memory: SKIPPED-not-FAILED for missing real-hardware dependencies. Folded into Task 2 commit (347459a).
+- Execute 05-05 process: NO `git stash` used. Two-commit cadence: 1def795 (Task 1 — integration tests append) → 347459a (Task 2 — real-mpirun test file). Phase 5 vertical end-to-end COMPLETE; awaiting /gsd-verify-phase 05 to flip status from `executing` to `verified` and then /gsd-transition to advance to milestone close (v1 milestone shipping).
 
 ### Pending Todos
 

@@ -49,7 +49,7 @@ The collector extracts these fields from the per-host data the MPI cluster colle
 
 ### Capacity (CAP)
 
-- [ ] **CAP-01**: At `datagen` startup, after computing the dataset size in bytes, the benchmark calls `os.statvfs()` on the **dataset destination directory** (`--data-dir` for training and checkpointing, the engine-specific data path for vectordb / kvcache — *not* `--results-dir`, which lives off the system-under-test and only holds logs and metadata) and compares free space against the computed size. If free space < computed size, the benchmark fails before generation begins with a message naming the path, the available bytes, the required bytes, and the deficit. Per-node check on multi-node runs (each rank checks its own destination so a single starved node fails fast).
+- [x] **CAP-01**: At `datagen` startup, after computing the dataset size in bytes, the benchmark calls `os.statvfs()` on the **dataset destination directory** (`--data-dir` for training and checkpointing, the engine-specific data path for vectordb / kvcache — *not* `--results-dir`, which lives off the system-under-test and only holds logs and metadata) and compares free space against the computed size. If free space < computed size, the benchmark fails before generation begins with a message naming the path, the available bytes, the required bytes, and the deficit. Per-node check on multi-node runs (each rank checks its own destination so a single starved node fails fast).
 - [x] **CAP-02**: At `datagen` or `run` startup on multi-host operations, the benchmark verifies that every participating host sees the **same shared filesystem** at the dataset destination directory. The check collects a filesystem identifier (e.g., `stat -f -c '%i' <data-dir>` on each host, or the Python equivalent `os.statvfs(<data-dir>).f_fsid`) from every rank and compares values. If the set of returned IDs has cardinality > 1, the benchmark fails before any work begins with a message listing each host and the filesystem ID it reported, plus a one-line explanation that this typically means one or more hosts have a local-disk path where a shared mount was expected. On single-host runs (`--hosts` defaults to None or has length 1), CAP-02 is a no-op. Implementation note for Phase 5 discuss/plan: tool choice (`stat -f` vs. `os.statvfs().f_fsid` vs. write-a-sentinel-and-read-on-peer) should be decided during planning; the `fsid` approach is simple but has known edge cases with bind mounts and FUSE that may warrant a sentinel-file fallback.
 
 ## v2 Requirements
@@ -111,7 +111,7 @@ Each v1 requirement maps to exactly one phase. See `.planning/ROADMAP.md` for fu
 | LIFE-02 | Phase 5 | Complete |
 | LIFE-03 | Phase 5 | Complete |
 | LIFE-04 | Phase 5 | Complete |
-| CAP-01  | Phase 5 | Pending |
+| CAP-01  | Phase 5 / Plan 05-03 + 05-05 | Complete |
 | CAP-02  | Phase 5 / Plan 05-04 | Complete |
 
 **Coverage:**
