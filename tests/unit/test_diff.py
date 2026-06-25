@@ -31,6 +31,8 @@ import below. Task 2 ships the implementation and flips the suite to GREEN.
 
 from __future__ import annotations
 
+import logging
+
 import pytest
 
 from mlpstorage_py.system_description.diff import (
@@ -431,4 +433,232 @@ class TestUnifiedDiffFormat:
         assert long_value in report, (
             f"D-41 truncation regression: long sysctl value not found "
             f"verbatim in report. Report:\n{report}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# TestDiffHandFillAffordance (12 tests; Phase 5.2 / HANDFILL-01)
+# ---------------------------------------------------------------------------
+#
+# Soft-pair pre-pass behavior:
+#   - When in-memory orphan has at least one "" scalar fingerprint position
+#     AND there is a unique on-disk orphan whose non-empty scalar positions
+#     all align AND whose 4 signature positions match exactly, the two
+#     stanzas are treated as the same client. Pitfall 3(a) SER-02 at the
+#     leaf level (diff.py:272-280) then preserves the submitter's value
+#     and no DiffEntry is emitted.
+#   - Real drift (collector resolves a DIFFERENT non-empty value) is NOT
+#     swallowed: the scalar-alignment check fails on the non-matching
+#     position and the stanzas remain orphans.
+#   - Ambiguous soft-pair candidates fall back to orphan emission (D-63).
+#   - D-60 reverse-direction: collector finally learns a value the user
+#     did not hand-fill → INFO log, no DiffEntry, no drift.
+#   - D-61 strict-signature: 4 callable signature positions are
+#     exact-match (empty signature () does NOT count as wildcard).
+
+
+class TestDiffHandFillAffordance:
+    """HANDFILL-01: hand-filled scalar fingerprint values survive a re-run
+    when the collector still returns '' at the same position.
+
+    Locks SC#1-#9 + D-60 (reverse-direction INFO log) + D-61 (signature
+    strict-match) + D-62 (two-pass pairing) + D-63 (ambiguous fallback).
+    """
+
+    # --- (a) Hand-fill survival cases (SC#2, SC#3) -----------------------
+
+    def test_handfilled_chassis_model_name_survives_rerun_with_empty_collector(self):
+        on_disk = [_make_node_dict(model_name="Dell Latitude 7420")]
+        in_mem = [_make_node_dict(model_name="")]
+        r = diff_node_dict_lists(on_disk, in_mem)
+        assert r.empty is True, (
+            "D-62 soft-pair: hand-filled chassis.model_name with "
+            "collector-empty in-memory must NOT register as drift; "
+            "soft-pair pass must pair the stanzas and let Pitfall 3(a) "
+            "preserve the submitter's value."
+        )
+
+    def test_handfilled_cpu_model_survives_rerun_with_empty_collector(self):
+        on_disk = [_make_node_dict(cpu_model="Intel Xeon Platinum 8480+")]
+        in_mem = [_make_node_dict(cpu_model="")]
+        r = diff_node_dict_lists(on_disk, in_mem)
+        assert r.empty is True, (
+            "D-62 soft-pair: hand-filled chassis.cpu_model + collector "
+            "empty MUST NOT register as drift."
+        )
+
+    def test_handfilled_os_name_survives_rerun_with_empty_collector(self):
+        on_disk = [_make_node_dict(os_name="Rocky Linux", os_version="9.5")]
+        in_mem = [_make_node_dict(os_name="", os_version="")]
+        r = diff_node_dict_lists(on_disk, in_mem)
+        assert r.empty is True, (
+            "D-62 soft-pair: hand-filled operating_system.name + "
+            "operating_system.version with collector empty MUST NOT "
+            "register as drift."
+        )
+
+    # --- (b) Real-drift-still-raises cases (SC#4) ------------------------
+
+    def test_real_drift_handfilled_position_recomputed_to_different_non_empty_still_raises(self):
+        # Submitter hand-filled "Dell PowerEdge R750"; collector now resolves
+        # a DIFFERENT non-empty value. The hand-fill affordance is strictly
+        # empty-side adopt-on-empty; a non-empty disagreement is real drift.
+        on_disk = [_make_node_dict(model_name="Dell PowerEdge R750")]
+        in_mem = [_make_node_dict(model_name="Dell PowerEdge R760")]
+        r = diff_node_dict_lists(on_disk, in_mem)
+        assert r.empty is False, (
+            "SC#4: hand-fill affordance must NEVER silence a non-empty "
+            "disagreement at a fingerprint scalar position. Real drift "
+            "still raises."
+        )
+
+    def test_real_drift_non_handfill_collector_change_still_raises(self):
+        # sysctl is part of sysctl_sig (signature position 8). Per D-61
+        # signatures are strict-match — a sysctl value change is a
+        # signature-position miss, NOT a soft-pair case. Confirms the
+        # soft-pair pass does NOT swallow signature-position changes.
+        on_disk = [_make_node_dict(sysctl=[{"name": "net.core.rmem_max", "value": "16777216"}])]
+        in_mem = [_make_node_dict(sysctl=[{"name": "net.core.rmem_max", "value": "33554432"}])]
+        r = diff_node_dict_lists(on_disk, in_mem)
+        assert r.empty is False, (
+            "D-61: sysctl_sig is a strict-match signature position; "
+            "soft-pair pass MUST NOT swallow signature differences."
+        )
+
+    # --- (c) Ambiguous fallback case (SC#5, D-63) ------------------------
+
+    def test_ambiguous_soft_pair_two_candidates_falls_back_to_orphans(self):
+        # Two distinct hand-filled clients (Dell A, Dell B); in-memory has
+        # two orphan stanzas with model_name="". The in-memory orphan
+        # ambiguously matches both on-disk orphans (they share all
+        # signatures and other scalar positions). Per D-63, ambiguity must
+        # fall back to orphan emission — never silently conflate distinct
+        # machines.
+        on_disk = [_make_node_dict(model_name="Dell A"), _make_node_dict(model_name="Dell B")]
+        in_mem = [_make_node_dict(model_name=""), _make_node_dict(model_name="")]
+        r = diff_node_dict_lists(on_disk, in_mem)
+        assert r.empty is False, (
+            "D-63: ambiguous soft-pair MUST fall back to orphan emission "
+            "— never silently conflate distinct machines."
+        )
+        assert any("fingerprint=" in e.path for e in r.entries), (
+            "D-63 fallback must emit fingerprint-level orphan entries "
+            "(not leaf-level), proving the unpaired orphans flowed into "
+            "the existing D-46/D-47 emission path."
+        )
+
+    # --- (d) D-61 signature strict-match cases ---------------------------
+
+    def test_signature_strict_match_empty_signature_does_not_soft_pair(self):
+        # In-memory has NO networking interfaces — networking_sig is the
+        # empty tuple (). Per D-61, empty signature on one side does NOT
+        # count as wildcard; must match the other side's signature
+        # exactly. Since on-disk has one interface, signatures differ →
+        # no soft-pair.
+        on_disk = [_make_node_dict(
+            model_name="Dell A",
+            networking=[{"type": "ethernet", "speed": 100, "state": "up",
+                         "traffic": [], "unit_count": 2}],
+        )]
+        in_mem = [_make_node_dict(model_name="", networking=[])]
+        r = diff_node_dict_lists(on_disk, in_mem)
+        assert r.empty is False, (
+            "D-61: empty signature () is NOT a wildcard. Soft-pair MUST "
+            "NOT pair stanzas with differing networking_sig values."
+        )
+
+    def test_signature_strict_match_different_sysctl_sigs_do_not_soft_pair(self):
+        # Scalar position (model_name) is soft-pair-eligible, but the
+        # sysctl_sig differs between sides. Per D-61, signatures stay
+        # strict-match — no soft-pair.
+        on_disk = [_make_node_dict(
+            model_name="Dell A",
+            sysctl=[{"name": "net.core.rmem_max", "value": "16777216"}],
+        )]
+        in_mem = [_make_node_dict(
+            model_name="",
+            sysctl=[{"name": "net.core.wmem_max", "value": "16777216"}],
+        )]
+        r = diff_node_dict_lists(on_disk, in_mem)
+        assert r.empty is False, (
+            "D-61: sysctl_sig strict-match. Different sysctl signatures "
+            "MUST block soft-pair even when a scalar position is "
+            "soft-pair-eligible."
+        )
+
+    # --- (e) D-60 reverse-direction INFO log cases -----------------------
+
+    def test_reverse_direction_collector_resolves_value_emits_info_log_no_drift(self, caplog):
+        # On-disk was "" (collector previously empty, user did NOT
+        # hand-fill); collector finally learned the value. Per D-60: INFO
+        # log emitted, NO DiffEntry, NO drift; on-disk file unchanged per
+        # LIFE-04.
+        on_disk = [_make_node_dict(model_name="")]
+        in_mem = [_make_node_dict(model_name="Dell Latitude E5450")]
+        with caplog.at_level(logging.INFO, logger="mlpstorage_py.system_description.diff"):
+            r = diff_node_dict_lists(on_disk, in_mem)
+        assert r.empty is True, (
+            "D-60: reverse-direction (recomputed non-empty + on-disk '') "
+            "MUST NOT raise drift."
+        )
+        assert any("collector resolved" in record.message for record in caplog.records), (
+            "D-60: reverse-direction MUST emit an INFO log of shape "
+            "'collector resolved <field>=...' so the operator sees the "
+            "new knowledge."
+        )
+
+    def test_reverse_direction_info_log_includes_field_path_and_resolved_value(self, caplog):
+        on_disk = [_make_node_dict(model_name="")]
+        in_mem = [_make_node_dict(model_name="Dell Latitude E5450")]
+        with caplog.at_level(logging.INFO, logger="mlpstorage_py.system_description.diff"):
+            diff_node_dict_lists(on_disk, in_mem)
+        joined = "\n".join(record.message for record in caplog.records)
+        assert "chassis.model_name" in joined, (
+            "D-60 log MUST include the field JSONPath so the operator "
+            "knows which field improved."
+        )
+        assert "Dell Latitude E5450" in joined, (
+            "D-60 log MUST include the resolved value so the operator "
+            "sees what the collector learned."
+        )
+        assert "LIFE-04" in joined, (
+            "D-60 log MUST hint at LIFE-04 (no-touch contract) so the "
+            "operator knows why the on-disk YAML was not updated."
+        )
+
+    # --- (f) Two-pass exact-match-first preservation (SC#2 pass-1) -------
+
+    def test_exact_match_pass_still_preserves_identical_fingerprints_no_soft_pair_invoked(self):
+        """Regression lock: passes pre-GREEN to prove exact-match preservation
+        still works; passes post-GREEN to prove soft-pair did not break it."""
+        on_disk, in_mem = _make_disk_and_memory_pair()
+        r = diff_node_dict_lists(on_disk, in_mem)
+        assert r.empty is True, (
+            "D-62 pass-1 preservation: exact-fingerprint match must "
+            "short-circuit before the soft-pair pre-pass; identical "
+            "fleets must surface as no-drift via the existing fast path."
+        )
+
+    # --- (g) Multi-client topology positive case (SC#5 paired correctly) -
+
+    def test_multi_client_topology_two_handfilled_three_total_pairs_correctly(self):
+        # 3-host fleet: hosts A and B exact-match; host C has its
+        # model_name hand-filled on disk and "" in memory. Only host C
+        # triggers soft-pair, with exactly one candidate (the Intel-C
+        # on-disk stanza).
+        on_disk = [
+            _make_node_dict(cpu_model="Intel A", model_name="Dell A"),
+            _make_node_dict(cpu_model="Intel B", model_name="Dell B"),
+            _make_node_dict(cpu_model="Intel C", model_name="HandFilledChassis"),
+        ]
+        in_mem = [
+            _make_node_dict(cpu_model="Intel A", model_name="Dell A"),
+            _make_node_dict(cpu_model="Intel B", model_name="Dell B"),
+            _make_node_dict(cpu_model="Intel C", model_name=""),
+        ]
+        r = diff_node_dict_lists(on_disk, in_mem)
+        assert r.empty is True, (
+            "D-62 + D-63: unique soft-pair candidate among distinct "
+            "topologies must pair correctly without conflating Intel-A "
+            "or Intel-B."
         )
