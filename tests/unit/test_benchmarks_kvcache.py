@@ -821,6 +821,35 @@ class TestExecuteRun:
         assert '--mca orte_abort_on_non_zero_status 0' in cmd0, \
             f"Missing --mca orte_abort_on_non_zero_status 0 in: {cmd0}"
 
+    def test_mpirun_passes_through_user_mpi_params(self, bm, fake_agg_result):
+        """User --mpi-params must reach mpirun, ordered before the mandatory
+        --mca orte_abort_on_non_zero_status 0 flag so OpenMPI's last-wins
+        resolution keeps the abort-suppression authoritative (#520)."""
+        # Shape matches what cli_parser.py emits post-shlex.split.
+        bm.args.mpi_params = ['-genv', 'PMI_VERSION=2', '--mca', 'btl', 'tcp,self']
+        bm.args.trials = 1
+        bm.args.inter_option_delay = 0
+        executed_cmds = []
+        def fake_execute(cmd, **kwargs):
+            executed_cmds.append(cmd)
+            return ('', '', 0)
+        with patch.object(bm, '_execute_command', side_effect=fake_execute), \
+             patch.object(bm, '_interruptible_sleep'), \
+             patch.object(bm, '_aggregate_option_results', return_value=fake_agg_result), \
+             patch.object(bm, '_write_run_summary'), \
+             patch.object(bm, 'write_metadata'):
+            bm._execute_run()
+        cmd0 = executed_cmds[0]
+        assert '-genv PMI_VERSION=2' in cmd0, \
+            f"Missing user --mpi-params in: {cmd0}"
+        assert '--mca btl tcp,self' in cmd0, \
+            f"Missing user --mpi-params in: {cmd0}"
+        # Mandatory --mca must follow user params (OpenMPI last-wins).
+        user_idx = cmd0.index('--mca btl tcp,self')
+        mandatory_idx = cmd0.index('--mca orte_abort_on_non_zero_status 0')
+        assert mandatory_idx > user_idx, \
+            f"Mandatory --mca must come after user --mpi-params in: {cmd0}"
+
     def test_mpirun_contains_npernode(self, bm, fake_agg_result):
         """mpirun command must contain '--npernode 2' when npernode=2 (DIST-03)."""
         bm.args.npernode = 2

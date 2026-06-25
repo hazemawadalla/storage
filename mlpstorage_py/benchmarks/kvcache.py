@@ -272,13 +272,21 @@ class KVCacheBenchmark(Benchmark):
         # Wrapper-adjacent config.yaml is the default; CLOSED forbids overriding.
         config_path = config or str(Path(self.kvcache_bin_path).parent / 'config.yaml')
 
+        # User --mpi-params (already shlex-flattened by the central CLI parser)
+        # are passed through first; the mandatory --mca is appended last so
+        # that OpenMPI's last-wins resolution for repeated --mca keys keeps
+        # the abort-suppression flag authoritative even if the user supplies a
+        # conflicting value (kvcache expects per-rank non-zero exits).
+        user_mpi_params = list(getattr(self.args, 'mpi_params', None) or [])
+        mpi_params = user_mpi_params + ['--mca', 'orte_abort_on_non_zero_status', '0']
+
         mpi_prefix = generate_mpi_prefix_cmd(
             mpi_cmd=getattr(self.args, 'mpi_bin', 'mpirun'),
             hosts=hosts,
             num_processes=total_ranks,
             oversubscribe=getattr(self.args, 'oversubscribe', False),
             allow_run_as_root=getattr(self.args, 'allow_run_as_root', False),
-            params=['--mca orte_abort_on_non_zero_status 0'],
+            params=mpi_params,
             logger=self.logger,
             processes_per_node=npernode,
         )
