@@ -3482,3 +3482,115 @@ class TestDrivesWiring:
         result = cc.collect_local_system_info()
         assert result["drives"] == []
         assert result.get("errors", {}).get("drives") == "drives boom"
+
+
+class TestSharedFsProbeNonRank0Silence:
+    """HARDEN-02 D-55.3 structural defense: only rank 0 writes to stdout.
+
+    The CAP-02 launcher's stdout-marker parsing (D-54/D-55) assumes
+    non-rank-0 ranks are silent on stdout. A future probe-script edit
+    that adds `print()` on other ranks without a `if rank == 0:` guard
+    would corrupt the parsed JSON without this test. The class is
+    parametrized over rank 0 (must emit markers) AND ranks 1/2/3 (must
+    be silent) so the rank-0-only contract is locked from both sides.
+
+    Mechanism: stub mpi4py at module level so the probe heredoc's
+    `from mpi4py import MPI` succeeds inside exec'd namespace; mock
+    MPI.COMM_WORLD.Get_rank() to return the parametrized rank; capture
+    sys.stdout via contextlib.redirect_stdout; assert the per-rank
+    contract on captured.getvalue().
+
+    Today (pre-HARDEN-02, file-based transport): rank=0 FAILS this test
+    because the current probe writes JSON to a file, not stdout — no
+    markers ever appear on stdout. This is the RED proof. Non-rank-0
+    ranks already pass GREEN today (they only write to stderr/files),
+    so the silence side of the test serves as the GREEN-state structural
+    defense once Task 2 lands the stdout transport.
+    """
+
+    @pytest.mark.parametrize("rank", [0, 1, 2, 3])
+    def test_rank0_emits_markers_and_non_rank0_silent(
+        self, tmp_path, monkeypatch, rank
+    ):
+        """rank 0 MUST emit __CAP02_RESULT_BEGIN__/END markers on stdout;
+        ranks 1, 2, 3 MUST emit zero bytes to stdout."""
+        import contextlib
+        import io
+        import re
+        import sys
+        from unittest.mock import MagicMock
+
+        # Stub mpi4py: the probe heredoc does `from mpi4py import MPI`.
+        fake_comm = MagicMock()
+        fake_comm.Get_rank.return_value = rank
+        fake_comm.Get_size.return_value = 4
+        # gather: root receives a list of payloads; non-root receives None.
+        if rank == 0:
+            # Build a successful all_payloads with cardinality 1.
+            fake_comm.gather.return_value = [
+                {"hostname": "h0", "rank": 0, "failure": None, "st_dev": 100, "st_ino": 200},
+                {"hostname": "h1", "rank": 1, "failure": None, "st_dev": 100, "st_ino": 200},
+                {"hostname": "h2", "rank": 2, "failure": None, "st_dev": 100, "st_ino": 200},
+                {"hostname": "h3", "rank": 3, "failure": None, "st_dev": 100, "st_ino": 200},
+            ]
+        else:
+            fake_comm.gather.return_value = None
+        fake_comm.bcast.return_value = "ok"
+        fake_comm.Barrier.return_value = None
+
+        fake_mpi_module = MagicMock()
+        fake_mpi_module.COMM_WORLD = fake_comm
+
+        # mpi4py is a package — provide both the top-level and the MPI submodule.
+        fake_mpi4py_pkg = MagicMock()
+        fake_mpi4py_pkg.MPI = fake_mpi_module
+        monkeypatch.setitem(sys.modules, "mpi4py", fake_mpi4py_pkg)
+        monkeypatch.setitem(sys.modules, "mpi4py.MPI", fake_mpi_module)
+
+        # NEW 2-positional argv signature per D-54: data_dir, run_uuid (no output_file).
+        monkeypatch.setattr(
+            sys, "argv",
+            ["probe", str(tmp_path), "silence-test-uuid"],
+        )
+
+        from mlpstorage_py.cluster_collector import SHARED_FS_PROBE_SCRIPT
+
+        captured = io.StringIO()
+        with contextlib.redirect_stdout(captured):
+            try:
+                exec(SHARED_FS_PROBE_SCRIPT, {"__name__": "__main__"})
+            except SystemExit:
+                pass  # probe calls sys.exit(0) on ok, sys.exit(1) on fail.
+            except Exception:
+                # Any other exception is OK on this code path — we are only
+                # locking the stdout contract; per-rank failure modes are
+                # exercised in tests/unit/test_shared_fs_probe.py.
+                pass
+
+        stdout_content = captured.getvalue()
+
+        if rank == 0:
+            assert "__CAP02_RESULT_BEGIN__" in stdout_content, (
+                f"rank 0 MUST emit __CAP02_RESULT_BEGIN__ on stdout (HARDEN-02 D-54). "
+                f"Got: {stdout_content!r}"
+            )
+            assert "__CAP02_RESULT_END__" in stdout_content, (
+                f"rank 0 MUST emit __CAP02_RESULT_END__ on stdout (HARDEN-02 D-54). "
+                f"Got: {stdout_content!r}"
+            )
+            # Verify the framed payload parses as JSON.
+            m = re.search(
+                r"__CAP02_RESULT_BEGIN__\s*\n(.*?)\n.*?__CAP02_RESULT_END__",
+                stdout_content,
+                re.DOTALL,
+            )
+            assert m is not None, (
+                f"rank 0 markers present but no payload extractable. Got: {stdout_content!r}"
+            )
+            payload = m.group(1).strip()
+            json.loads(payload)  # raises if invalid
+        else:
+            assert stdout_content == "", (
+                f"rank {rank} emitted {len(stdout_content)} stdout bytes; "
+                f"expected zero (HARDEN-02 D-55.3). Content: {stdout_content!r}"
+            )

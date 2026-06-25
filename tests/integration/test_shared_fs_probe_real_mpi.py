@@ -182,6 +182,82 @@ class TestSharedFsProbeRealMpi:
         parsed = json.loads(output_json.read_text())
         assert parsed.get('status') == 'ok'
 
+    def test_cr02_rank0_result_arrives_via_stdout_markers_not_file(self, tmp_path):
+        """HARDEN-02 / REVIEW-CR-02 lock: rank-0 emits JSON between
+        __CAP02_RESULT_BEGIN__ / __CAP02_RESULT_END__ markers on stdout.
+
+        Reproduces the REVIEW-CR-02 shape (launch host outside --hosts /
+        rank 0 lands on remote) via --host 127.0.0.1:1,127.0.0.1:1 +
+        --tag-output. The probe is invoked with the new 2-positional argv
+        signature (data_dir, run_uuid) — NO output_file. The launcher
+        recovers the rank-0 payload from result.stdout via the marker
+        regex; no launch-host-local file is involved.
+
+        This test fails RED today (pre-fix) because:
+          - The current argv parse requires len(sys.argv) >= 4 (data_dir,
+            run_uuid, output_file). With only 2 positionals, the probe
+            writes the _argv_error JSON to /tmp/cap02_err.json and
+            sys.exit(1) — returncode != 0, no markers in stdout.
+          - Even if argv passed, the current code writes to output_file,
+            not stdout — no markers would appear.
+
+        Passes GREEN once Task 2 of HARDEN-02 lands the stdout transport.
+        """
+        import re
+
+        script_path = _write_probe_script(tmp_path)
+        run_uuid = 'test-uuid-cr02-stdout'
+
+        # NOTE: --tag-output + --host 127.0.0.1:1,127.0.0.1:1 simulate the
+        # remote-rank-0 scenario. Only 2 positionals after the script per
+        # the new D-54 argv contract — no output_file.
+        result = subprocess.run(
+            ['mpirun', '-n', '2', '--allow-run-as-root',
+             '--tag-output',
+             '--host', '127.0.0.1:1,127.0.0.1:1',
+             sys.executable, str(script_path),
+             str(tmp_path), run_uuid],
+            capture_output=True, text=True, timeout=120,
+        )
+
+        assert result.returncode == 0, (
+            f"mpirun exited non-zero: stdout={result.stdout!r} "
+            f"stderr={result.stderr!r}"
+        )
+
+        # Markers MUST be present in stdout (D-54/D-55 stdout transport).
+        assert '__CAP02_RESULT_BEGIN__' in result.stdout, (
+            f"expected __CAP02_RESULT_BEGIN__ in stdout; got stdout={result.stdout!r}"
+        )
+        assert '__CAP02_RESULT_END__' in result.stdout, (
+            f"expected __CAP02_RESULT_END__ in stdout; got stdout={result.stdout!r}"
+        )
+
+        # The misleading "mpi4py not installed" error must NOT appear anywhere
+        # (HARDEN-02 acceptance criterion — the old file-based code raised
+        # this even when the probe semantically succeeded).
+        assert 'mpi4py not installed' not in result.stdout, (
+            f"misleading mpi4py-not-installed substring leaked into stdout: {result.stdout!r}"
+        )
+        assert 'mpi4py not installed' not in result.stderr, (
+            f"misleading mpi4py-not-installed substring leaked into stderr: {result.stderr!r}"
+        )
+
+        # The JSON between markers parses and reports status='ok'. Strip a
+        # leading [host:rank] tag from --tag-output if present.
+        m = re.search(
+            r'__CAP02_RESULT_BEGIN__\s*\n(.*?)\n.*?__CAP02_RESULT_END__',
+            result.stdout, re.DOTALL,
+        )
+        assert m is not None, (
+            f"regex failed to extract payload between markers: {result.stdout!r}"
+        )
+        payload = re.sub(r'^\[[^\]]+\]\s*', '', m.group(1).strip())
+        parsed = json.loads(payload)
+        assert parsed.get('status') == 'ok', (
+            f"expected status='ok' in rank-0 payload, got {parsed!r}"
+        )
+
     def test_two_local_ranks_outputs_carry_correct_uuid(self, tmp_path):
         """W-5 launcher pass-through end-to-end: the run_uuid passed as argv[2]
         flows through the probe body to the sentinel filename. We verify by
