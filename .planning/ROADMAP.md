@@ -240,4 +240,4 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5
 | 3. Chassis Model + Networking Coverage | 5/5 | Plans complete; awaiting verify | - |
 | 4. Sysctl, Environment, and Drives Coverage | 5/5 | Complete | 2026-06-23 |
 | 5. Logical Diff Lifecycle + Capacity Gate | 5/5 | Plans complete; awaiting verify | - |
-| 5.1. Phase 5 Hardening & UAT Closeout | 4/4 | Complete   | 2026-06-25 |
+| 5.1. Phase 5 Hardening & UAT Closeout | 4/4 | Complete    | 2026-06-25 |
