@@ -821,6 +821,35 @@ class TestExecuteRun:
         assert '--mca orte_abort_on_non_zero_status 0' in cmd0, \
             f"Missing --mca orte_abort_on_non_zero_status 0 in: {cmd0}"
 
+    def test_mpirun_passes_through_user_mpi_params(self, bm, fake_agg_result):
+        """User --mpi-params must reach mpirun, ordered before the mandatory
+        --mca orte_abort_on_non_zero_status 0 flag so OpenMPI's last-wins
+        resolution keeps the abort-suppression authoritative (#520)."""
+        # Shape matches what cli_parser.py emits post-shlex.split.
+        bm.args.mpi_params = ['-genv', 'PMI_VERSION=2', '--mca', 'btl', 'tcp,self']
+        bm.args.trials = 1
+        bm.args.inter_option_delay = 0
+        executed_cmds = []
+        def fake_execute(cmd, **kwargs):
+            executed_cmds.append(cmd)
+            return ('', '', 0)
+        with patch.object(bm, '_execute_command', side_effect=fake_execute), \
+             patch.object(bm, '_interruptible_sleep'), \
+             patch.object(bm, '_aggregate_option_results', return_value=fake_agg_result), \
+             patch.object(bm, '_write_run_summary'), \
+             patch.object(bm, 'write_metadata'):
+            bm._execute_run()
+        cmd0 = executed_cmds[0]
+        assert '-genv PMI_VERSION=2' in cmd0, \
+            f"Missing user --mpi-params in: {cmd0}"
+        assert '--mca btl tcp,self' in cmd0, \
+            f"Missing user --mpi-params in: {cmd0}"
+        # Mandatory --mca must follow user params (OpenMPI last-wins).
+        user_idx = cmd0.index('--mca btl tcp,self')
+        mandatory_idx = cmd0.index('--mca orte_abort_on_non_zero_status 0')
+        assert mandatory_idx > user_idx, \
+            f"Mandatory --mca must come after user --mpi-params in: {cmd0}"
+
     def test_mpirun_contains_npernode(self, bm, fake_agg_result):
         """mpirun command must contain '--npernode 2' when npernode=2 (DIST-03)."""
         bm.args.npernode = 2
@@ -1480,3 +1509,137 @@ class TestExecuteRunHonorsNumProcesses:
             rc = bm._execute_run()
         assert rc == 1
         mock_exec.assert_not_called()
+
+
+class TestProbeResultsDirShared:
+    """Tests for KVCacheBenchmark._probe_results_dir_shared.
+
+    Issue #521: kvcache must fail fast when --results-dir is not visible at
+    the same path on every host in --hosts. Otherwise rank result files
+    written on remote nodes are invisible to the controller's aggregation.
+    """
+
+    def test_localhost_only_is_noop(self, tmp_path):
+        """All-localhost runs cannot exhibit the bug; probe must not spawn mpi."""
+        bm = _make_run_benchmark(tmp_path)
+        with patch.object(bm, '_execute_command') as mock_exec:
+            bm._probe_results_dir_shared(['localhost'])
+        mock_exec.assert_not_called()
+
+    def test_single_host_is_noop(self, tmp_path):
+        """A single-host run (even non-localhost) cannot scatter results."""
+        bm = _make_run_benchmark(tmp_path)
+        with patch.object(bm, '_execute_command') as mock_exec:
+            bm._probe_results_dir_shared(['h1'])
+        mock_exec.assert_not_called()
+
+    def test_passes_when_all_hosts_write_sentinel(self, tmp_path):
+        """Shared FS: each host writes its sentinel; probe returns cleanly."""
+        bm = _make_run_benchmark(tmp_path)
+
+        def fake_execute(cmd, **kwargs):
+            # Simulate every host successfully landing its sentinel in the
+            # probe dir (which is what a shared FS would produce).
+            probe_dir = Path(bm.run_result_output) / '.fs_probe'
+            assert probe_dir.exists(), "probe dir should be pre-created"
+            # Extract probe_id from the embedded inline script in the command.
+            import re
+            m = re.search(r"'([0-9a-f]{12})__rank'", cmd)
+            assert m is not None, f"probe_id not found in cmd: {cmd}"
+            probe_id = m.group(1)
+            for rank, host in enumerate(['h1', 'h2', 'h3']):
+                marker = probe_dir / f"{probe_id}__rank{rank}__{host}.ok"
+                marker.write_text(host)
+            return ('', '', 0)
+
+        with patch.object(bm, '_execute_command', side_effect=fake_execute):
+            bm._probe_results_dir_shared(['h1', 'h2', 'h3'])
+
+    def test_raises_when_remote_hosts_miss_sentinel(self, tmp_path):
+        """Non-shared FS: only the controller's sentinel is visible; fail."""
+        bm = _make_run_benchmark(tmp_path)
+
+        def fake_execute(cmd, **kwargs):
+            import re
+            probe_dir = Path(bm.run_result_output) / '.fs_probe'
+            m = re.search(r"'([0-9a-f]{12})__rank'", cmd)
+            probe_id = m.group(1)
+            # Only one host out of three landed a sentinel — the other two
+            # wrote to their own local FS (invisible to the controller).
+            (probe_dir / f"{probe_id}__rank0__h1.ok").write_text('h1')
+            return ('', '', 0)
+
+        with patch.object(bm, '_execute_command', side_effect=fake_execute):
+            with pytest.raises(RuntimeError) as excinfo:
+                bm._probe_results_dir_shared(['h1', 'h2', 'h3'])
+        msg = str(excinfo.value)
+        assert 'not visible on every host' in msg
+        assert 'shared' in msg.lower() or 'NFS' in msg
+        # Hostnames the user passed must surface in the diagnostic.
+        assert 'h2' in msg and 'h3' in msg
+
+    def test_strips_slot_suffixes_before_probing(self, tmp_path):
+        """--hosts 'h1:4 h2:4' should probe 2 unique hosts, not 8."""
+        bm = _make_run_benchmark(tmp_path)
+        captured = {}
+
+        def fake_execute(cmd, **kwargs):
+            captured['cmd'] = cmd
+            # Land sentinels for both unique hosts.
+            import re
+            probe_dir = Path(bm.run_result_output) / '.fs_probe'
+            m = re.search(r"'([0-9a-f]{12})__rank'", cmd)
+            probe_id = m.group(1)
+            (probe_dir / f"{probe_id}__rank0__h1.ok").write_text('h1')
+            (probe_dir / f"{probe_id}__rank1__h2.ok").write_text('h2')
+            return ('', '', 0)
+
+        with patch.object(bm, '_execute_command', side_effect=fake_execute):
+            bm._probe_results_dir_shared(['h1:4', 'h2:4'])
+
+        # 1 rank per unique host, with :1 slot pinning in the host arg.
+        assert '-n 2 ' in captured['cmd']
+        assert '-host h1:1,h2:1' in captured['cmd']
+
+    def test_execute_run_invokes_probe_for_multi_host(self, tmp_path):
+        """_execute_run should call the probe when --hosts has remote entries."""
+        bm = _make_run_benchmark(tmp_path)
+        bm.args.trials = 1
+        bm.args.inter_option_delay = 0
+        bm.args.num_processes = 2
+        bm.args.npernode = 1  # consistent with num_processes=2 across 2 hosts
+        bm.args.hosts = ['h1', 'h2']
+        agg = {
+            'option': 1, 'aggregated_read_bandwidth_gbps': 0.0,
+            'aggregated_write_bandwidth_gbps': 0.0,
+            'aggregated_avg_throughput_tokens_per_sec': 0.0,
+            'aggregated_storage_throughput_tokens_per_sec': 0.0,
+            'aggregated_p95_latency_ms': 0.0,
+            'rank_count': 2, 'trial_count': 1,
+            'partial_failure': False, 'missing_files': [], 'cpu_tier_ranks': [],
+        }
+        with patch.object(bm, '_probe_results_dir_shared') as mock_probe, \
+             patch.object(bm, '_execute_command', return_value=('', '', 0)), \
+             patch.object(bm, '_interruptible_sleep'), \
+             patch.object(bm, '_aggregate_option_results', return_value=agg), \
+             patch.object(bm, '_write_run_summary'), \
+             patch.object(bm, 'write_metadata'):
+            bm._execute_run()
+        mock_probe.assert_called_once_with(['h1', 'h2'])
+
+    def test_execute_run_skips_probe_in_what_if_mode(self, tmp_path):
+        """--what-if must not spawn mpirun probes (no execution at all)."""
+        bm = _make_run_benchmark(tmp_path, what_if=True)
+        bm.args.trials = 1
+        bm.args.inter_option_delay = 0
+        bm.args.num_processes = 2
+        bm.args.npernode = 1
+        bm.args.hosts = ['h1', 'h2']
+        with patch.object(bm, '_probe_results_dir_shared') as mock_probe, \
+             patch.object(bm, '_execute_command', return_value=('', '', 0)), \
+             patch.object(bm, '_interruptible_sleep'), \
+             patch.object(bm, '_aggregate_option_results'), \
+             patch.object(bm, '_write_run_summary'), \
+             patch.object(bm, 'write_metadata'):
+            bm._execute_run()
+        mock_probe.assert_not_called()
