@@ -16,6 +16,7 @@
     * [3.6. Training OPEN versus CLOSED Options](#36-training-open-versus-closed-options)
 * [4. Validating the Checkpointing Workloads](#4-validating-the-checkpointing-workloads)
     * [4.1. Checkpointing Sizing Options](#41-checkpointing-sizing-options)
+    * 
     * [4.2. Checkpointing Generation Options](#42-checkpointing-generation-options)
     * [4.3. Checkpointing Run Options](#43-checkpointing-run-options)
     * [4.4. Checkpointing Access Via POSIX API Options](#44-checkpointing-access-via-posix-api-options)
@@ -118,6 +119,8 @@ configuration of storage system and to link together those results with the .pdf
 
 2.1.18. **runTimestampGap** --  The timestamp (the day and time) represented by the name of each *timestamp directory* must be separated by less than the duration of a single *timestamp directory* from it's neighboring *timestamp directories*.  Ie: the gap between a consecutive pair of *timestamp directories* must be short enough that we can be sure that there was no benchmark activity between them.
 
+2.1.18a.  **runPickingSubsets** -- It is permissible to execute a large number of runs (all consecutive) and then delete the *timestamp directories* for all but 6 consecutive runs in the middle.  This differs from "cherry picking" in that these runs must be consecutive, see **runTimestampGap**.
+
 2.1.19. **runFiles** --  Within each *timestamp directory* within the "run" *phase*, there must exist the following files: "training_run.stdout.log", "training_run.stderr.log" file, "*output.json, "*per_epoch_stats.json", "*summary.json", and "dlio.log", plus a subdirectory named "dlio_config".  These names are case-sensitive.
 
 2.1.20. **runDlioConfig** --  The "dlio_config" subdirectory in each *timestamp directory* must contain the following list of files, and nothing else: "config.yaml", "hydra.yaml", and "overrides.yaml".  These names are case-sensitive.
@@ -129,6 +132,8 @@ configuration of storage system and to link together those results with the .pdf
 2.1.23. **checkpointingTimestamps** --  Within the *workload directories* within the "checkpointing" directory hierarchy, there must be either one or two *timestamp directories* named *YYYYMMDD_HHmmss" that represent a *timestamp* of when that part of the test run was completed (one timestamp directory per invocation, per §4.7.1: a single combined invocation OR a write-phase invocation followed by a read-phase invocation).  Where Y's are replaced with the year the run was performed, M's are replaced with the month, D's with the day, H's with the hour (in 24-hour format), m's with the minute, and s's with the second.  The timestamps should be relative to the local timezone where the test was actually run.
 
 2.1.24. **checkpointingTimestampGap** --  The timestamp (the day and time) represented by the name of each *timestamp directory* must be separated by less than the duration of a single *timestamp directory* from it's neighboring *timestamp directories*.  Ie: the gap between a consecutive pair of *timestamp directories* must be short enough that we can be sure that there was no benchmark activity between them.
+
+2.1.24a.  **checkpointingPickingSubsets** -- It is permissible to execute a large set of runs (all consecutive) and then delete all but one run (with 10 checkpoint files in it) in the middle.
 
 2.1.25. **checkpointingFiles** --  Within the *timestamp directories* within the "checkpointing" directory hierarchy, there must exist the following files: "checkpointing_run.stdout.log", "checkpointing_run.stderr.log" file, "*output.json, "*per_epoch_stats.json", "*summary.json", and "dlio.log", plus a subdirectory named "dlio_config".  These names are case-sensitive.
 

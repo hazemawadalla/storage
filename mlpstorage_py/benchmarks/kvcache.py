@@ -17,13 +17,16 @@ Classes:
 
 import json
 import os
+import shlex
 import sys
 import time
+import uuid
 from pathlib import Path
 from typing import Dict, Any, List
 from statistics import fmean
 
 from mlpstorage_py.benchmarks.base import Benchmark
+from mlpstorage_py.cluster_collector import _is_localhost
 from mlpstorage_py.config import (
     BENCHMARK_TYPES,
     KVCACHE_DEFAULT_DURATION,
@@ -272,16 +275,31 @@ class KVCacheBenchmark(Benchmark):
         # Wrapper-adjacent config.yaml is the default; CLOSED forbids overriding.
         config_path = config or str(Path(self.kvcache_bin_path).parent / 'config.yaml')
 
+        # User --mpi-params (already shlex-flattened by the central CLI parser)
+        # are passed through first; the mandatory --mca is appended last so
+        # that OpenMPI's last-wins resolution for repeated --mca keys keeps
+        # the abort-suppression flag authoritative even if the user supplies a
+        # conflicting value (kvcache expects per-rank non-zero exits).
+        user_mpi_params = list(getattr(self.args, 'mpi_params', None) or [])
+        mpi_params = user_mpi_params + ['--mca', 'orte_abort_on_non_zero_status', '0']
+
         mpi_prefix = generate_mpi_prefix_cmd(
             mpi_cmd=getattr(self.args, 'mpi_bin', 'mpirun'),
             hosts=hosts,
             num_processes=total_ranks,
             oversubscribe=getattr(self.args, 'oversubscribe', False),
             allow_run_as_root=getattr(self.args, 'allow_run_as_root', False),
-            params=['--mca orte_abort_on_non_zero_status 0'],
+            params=mpi_params,
             logger=self.logger,
             processes_per_node=npernode,
         )
+
+        # Issue #521: rank result JSONs are written on the node where each rank
+        # lands, but aggregation globs them locally on the controller. Without a
+        # shared filesystem, remote-host results are invisible and the run
+        # silently records partial_failure. Fail fast with an actionable error.
+        if not getattr(self.args, 'what_if', False):
+            self._probe_results_dir_shared(hosts)
 
         option_results = {}
         for option in [1, 2, 3]:
@@ -488,6 +506,103 @@ class KVCacheBenchmark(Benchmark):
                 self.logger.info("Inter-option sleep interrupted by user.")
                 raise
 
+    def _probe_results_dir_shared(self, hosts: List[str]) -> None:
+        """Verify --results-dir is visible at the same path on every host.
+
+        Issue #521: ``mlperf_wrapper.py`` writes ``kvcache_results_*.json``
+        on whichever node each rank lands on, but
+        ``_aggregate_option_results`` globs locally on the controller. Without
+        a filesystem mounted at the same path on every host listed in
+        ``--hosts``, the controller never sees the remote-host result files
+        and the run silently records ``partial_failure``.
+
+        We probe by asking each unique host (1 rank per host) to drop a
+        sentinel file inside ``self.run_result_output``. If the FS is shared,
+        the controller sees N sentinels; if not, it sees only the sentinel
+        from the host(s) it shares storage with. We fail closed with a
+        diagnostic that names the shared-FS requirement, so the user is not
+        stuck debugging a partial-failure summary after the option loop has
+        already run for ~15+ minutes.
+
+        No-ops when every entry in ``hosts`` resolves to the local machine
+        (single-host runs cannot exhibit the bug).
+        """
+        unique_hosts: List[str] = []
+        seen = set()
+        for raw in hosts or []:
+            hostname = raw.split(':')[0] if ':' in raw else raw
+            if hostname and hostname not in seen:
+                seen.add(hostname)
+                unique_hosts.append(hostname)
+
+        if len(unique_hosts) <= 1:
+            return
+        if all(_is_localhost(h) for h in unique_hosts):
+            return
+
+        probe_id = uuid.uuid4().hex[:12]
+        probe_dir = Path(self.run_result_output) / '.fs_probe'
+        probe_dir.mkdir(parents=True, exist_ok=True)
+
+        # Inline probe: each rank tags a sentinel with its hostname so we can
+        # tell from the controller which hosts share the FS and which do not.
+        # ``mkdir(parents=True, exist_ok=True)`` lets the rank succeed even
+        # when --results-dir was never created on its node (it writes to its
+        # own local filesystem; controller will not see those sentinels).
+        inline = (
+            "import os,socket,pathlib;"
+            f"d=pathlib.Path({str(probe_dir)!r});"
+            "d.mkdir(parents=True,exist_ok=True);"
+            "r=os.environ.get('OMPI_COMM_WORLD_RANK',os.environ.get('PMI_RANK','x'));"
+            "h=socket.gethostname();"
+            f"(d/('{probe_id}__rank'+r+'__'+h+'.ok')).write_text(h)"
+        )
+
+        probe_hosts_arg = ",".join(f"{h}:1" for h in unique_hosts)
+        mpi_bin = getattr(self.args, 'mpi_bin', 'mpirun')
+        probe_prefix = (
+            f"{mpi_bin} -n {len(unique_hosts)} -host {probe_hosts_arg} "
+            f"--map-by node --bind-to none"
+        )
+        if getattr(self.args, 'allow_run_as_root', False):
+            probe_prefix += " --allow-run-as-root"
+
+        probe_cmd = f"{probe_prefix} {sys.executable} -c {shlex.quote(inline)}"
+
+        self.logger.status(
+            f"Probing --results-dir visibility across "
+            f"{len(unique_hosts)} host(s)..."
+        )
+        self._execute_command(
+            probe_cmd,
+            output_file_prefix=f"kvcache_fs_probe_{self.run_datetime}",
+            print_stdout=False,
+            print_stderr=False,
+        )
+
+        found_hosts: set = set()
+        for marker in probe_dir.glob(f"{probe_id}__rank*__*.ok"):
+            try:
+                found_hosts.add(marker.read_text().strip())
+            except Exception:
+                continue
+
+        if len(found_hosts) >= len(unique_hosts):
+            return
+
+        raise RuntimeError(
+            "kvcache --results-dir is not visible on every host listed in "
+            f"--hosts. Probed {len(unique_hosts)} host(s) "
+            f"({sorted(unique_hosts)}); only {len(found_hosts)} wrote a "
+            f"sentinel into {self.run_result_output} "
+            f"({sorted(found_hosts)}). The kvcache benchmark requires "
+            "--results-dir to be on a filesystem mounted at the same path on "
+            "every host in --hosts (e.g. NFS/Lustre/GPFS); otherwise rank "
+            "result files written on remote nodes are invisible to the "
+            "controller's aggregation step. Mount a shared filesystem and "
+            "re-run, or run on a single host."
+        )
+
     def _aggregate_option_results(
         self,
         option: int,
@@ -547,6 +662,20 @@ class KVCacheBenchmark(Benchmark):
             all_avg_throughput.append(sum(trial_avg_throughput))
             all_storage_throughput.append(sum(trial_storage_throughput))
             all_p95_latency.append(max(trial_p95_latency) if trial_p95_latency else 0.0)
+        if missing_files:
+            hosts = getattr(self.args, 'hosts', None) or []
+            multi_host = any(not _is_localhost(h.split(':')[0]) for h in hosts)
+            if multi_host:
+                # Defense-in-depth — _probe_results_dir_shared should already
+                # have failed the run before we get here. Surface the same
+                # hint anyway in case the probe was skipped or missed an edge
+                # case (e.g. partial mount on a subset of nodes).
+                self.logger.warning(
+                    f"Option {option}: {len(missing_files)} rank result "
+                    "file(s) missing. In multi-host runs this typically "
+                    "means --results-dir is not on a filesystem visible at "
+                    "the same path on every host in --hosts (see issue #521)."
+                )
         return {
             'option': option,
             'aggregated_read_bandwidth_gbps': fmean(all_read_bw) if all_read_bw else 0.0,

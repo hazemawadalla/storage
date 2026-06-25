@@ -48,7 +48,10 @@ KVCACHE_HELP_MESSAGES = {
         "'latency' optimizes for response time, 'throughput' for requests/second."
     ),
     'kvcache_run': (
-        "Run the MLPerf KV Cache benchmark sequence (options 1, 2, and 3 via mlperf_wrapper.py)."
+        "Run the MLPerf KV Cache benchmark sequence (options 1, 2, and 3 via mlperf_wrapper.py). "
+        "Multi-host runs (--hosts with more than one host) REQUIRE --results-dir to be on a "
+        "filesystem mounted at the same path on every host (e.g. NFS/Lustre/GPFS); rank result "
+        "JSONs are written on the node where each rank lands and aggregated on the controller."
     ),
     'kvcache_datasize': (
         "Calculate memory requirements for KV cache based on model and user count."
