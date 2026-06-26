@@ -237,7 +237,7 @@ wheels = [
 [[package]]
 name = "dlio-benchmark"
 version = "3.0.2"
-source = { git = "https://github.com/mlcommons/DLIO_local_changes.git?branch=main#b63fef4102cce46432e8f6a1ba6b655f79ff70f5" }
+source = { git = "https://github.com/mlcommons/DLIO_local_changes.git?branch=main#75d129b1ca3b659d2b5095a6fc320f4033a50b2e" }
 dependencies = [
     { name = "dgen-py", marker = "sys_platform == 'linux'" },
     { name = "h5py", marker = "sys_platform == 'linux'" },
