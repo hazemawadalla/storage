@@ -1505,8 +1505,8 @@ class IntegratedBenchmark:
         print(f"  A 200MiB block at 1GiB/s NVMe read = ~200 ms device latency.")
         print(f"  Compare latencies against block sizes, not against 4KiB page I/O.\n")
 
-"""
-Printing of pass/fail is not used in MLPerf 3.0
+        """
+        # Printing of pass/fail is not used in MLPerf 3.0
 
         PASS_SYMBOL = "[OK]"
         FAIL_SYMBOL = "[X]"
@@ -1539,7 +1539,7 @@ Printing of pass/fail is not used in MLPerf 3.0
 
                 unit_suffix = unit if unit else ''
                 print(f"  {symbol} {criterion['name']}: {actual_str}{unit_suffix} (target: {target_str}{unit_suffix})")
-"""
+        """
 
         print(f"\n### OVERALL PERFORMANCE ###")
         print(f"Requests Completed: {summary['total_requests']}")
