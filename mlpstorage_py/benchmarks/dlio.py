@@ -10,6 +10,7 @@ from mlpstorage_py.config import (CONFIGS_ROOT_DIR, BENCHMARK_TYPES, EXEC_TYPE, 
                                LLM_ALLOWED_VALUES, LLM_SUBSET_PROCS, EXIT_CODE, MODELS, HYDRA_OUTPUT_SUBDIR,
                                LLM_SIZE_BY_RANK)
 from mlpstorage_py.dependency_check import validate_benchmark_dependencies
+from mlpstorage_py.errors import ConfigurationError, ErrorCode
 from mlpstorage_py.rules import calculate_training_data_size, HostInfo, HostMemoryInfo, HostCPUInfo, ClusterInformation
 from mlpstorage_py.utils import (read_config_from_file, create_nested_dict, update_nested_dict, generate_mpi_prefix_cmd)
 from mlpstorage_py.storage_config import resolve_object_storage_config
@@ -324,6 +325,54 @@ class DLIOBenchmark(Benchmark, abc.ABC):
         normalized = (parsed.netloc + parsed.path).rstrip('/')
         return normalized or parsed.netloc
 
+    def _raise_unsupported_workload(self, workload_abs):
+        """Raise ConfigurationError when the resolved workload YAML does not exist.
+
+        The DLIO workload YAML name is derived from CLI args
+        (``<model>_<accelerator>.yaml`` for training, ``<model>.yaml`` for
+        checkpointing). When the file is absent the user has chosen a
+        combination we have no workload definition for — surface this with
+        an explicit "not supported" message and (for training) point at
+        the v3.0 submittable combinations.
+        """
+        model = getattr(self.args, 'model', None)
+        accel = getattr(self.args, 'accelerator_type', None)
+
+        if self.BENCHMARK_TYPE == BENCHMARK_TYPES.training:
+            message = (
+                f"The combination --model={model} --accelerator-type={accel} "
+                f"is not supported."
+            )
+            suggestion = (
+                f"Missing workload definition: {workload_abs}\n"
+                "  v3.0 submittable combinations (CLOSED or OPEN):\n"
+                "    --model unet3d    --accelerator-type b200\n"
+                "    --model retinanet --accelerator-type b200\n"
+                "    --model retinanet --accelerator-type mi355\n"
+                "  Other (model, accelerator) pairs work under `whatif` if a "
+                "workload definition file exists for them; this combination "
+                "has none."
+            )
+            parameter = "model+accelerator-type"
+            actual = f"{model} + {accel}"
+        else:
+            message = f"The model --model={model} is not supported."
+            suggestion = (
+                f"Missing workload definition: {workload_abs}\n"
+                "  Pass a --model value that has a matching "
+                "configs/dlio/workload/<model>.yaml file."
+            )
+            parameter = "model"
+            actual = str(model)
+
+        raise ConfigurationError(
+            message=message,
+            parameter=parameter,
+            actual=actual,
+            suggestion=suggestion,
+            code=ErrorCode.CONFIG_FILE_NOT_FOUND,
+        )
+
     def process_dlio_params(self, config_file):
         params_dict = dict() if not self.args.params else {k: v for k, v in (item.split("=") for item in self.args.params)}
 
@@ -337,7 +386,11 @@ class DLIOBenchmark(Benchmark, abc.ABC):
                 )
                 params_dict['storage.storage_root'] = normalized
 
-        yaml_params = read_config_from_file(os.path.join(self.DLIO_CONFIG_PATH, "workload", config_file))
+        workload_rel = os.path.join(self.DLIO_CONFIG_PATH, "workload", config_file)
+        workload_abs = os.path.join(CONFIGS_ROOT_DIR, workload_rel)
+        if not os.path.isfile(workload_abs):
+            self._raise_unsupported_workload(workload_abs)
+        yaml_params = read_config_from_file(workload_rel)
         combined_params = update_nested_dict(yaml_params, create_nested_dict(params_dict))
 
         self.logger.debug(f'yaml params: \n{pprint.pformat(yaml_params)}')
