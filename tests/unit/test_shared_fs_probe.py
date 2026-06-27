@@ -618,15 +618,21 @@ class TestPitfall4BcastStatusPreventsProceed:
         saved_argv = sys.argv
         saved_mpi4py = sys.modules.get("mpi4py")
         saved_mpi = sys.modules.get("mpi4py.MPI")
+        # The probe's rank-0 D-49 quiesce path sleeps 5s; neutralize for the
+        # unit test (we're only locking call ordering, not timing).
+        import time as _time
+        saved_sleep = _time.sleep
         try:
             sys.modules["mpi4py"] = fake_mpi4py
             sys.modules["mpi4py.MPI"] = _FakeMPI()
+            _time.sleep = lambda *_a, **_kw: None
             sys.argv = ["<probe>", str(tmp_path), "test-uuid", out_file]
             namespace = {"__name__": "__main__"}
             # The heredoc body calls sys.exit at the end; trap it.
             with pytest.raises(SystemExit):
                 exec(SHARED_FS_PROBE_SCRIPT, namespace)
         finally:
+            _time.sleep = saved_sleep
             sys.argv = saved_argv
             if saved_mpi4py is not None:
                 sys.modules["mpi4py"] = saved_mpi4py
