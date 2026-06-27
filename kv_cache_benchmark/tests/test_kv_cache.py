@@ -1102,6 +1102,7 @@ class TestMultiTierCacheWithGPU:
         assert success is True
         assert location == 'gpu'
     
+    @pytest.mark.slow
     def test_gpu_overflow_to_cpu(self, multi_tier_cache_with_gpu):
         """When GPU is full, should overflow to CPU."""
         # Fill GPU with large allocations
@@ -3899,6 +3900,7 @@ class TestVisualizeUserRequestFlow:
 class TestBottleneckProfiling:
     """Profile bottleneck detection in the KV cache benchmark."""
 
+    @pytest.mark.slow
     def test_profile_allocate_vs_access_overhead(self):
         """Profile allocate vs access operations to identify bottleneck ratios."""
         import time as time_mod
