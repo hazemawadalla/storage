@@ -172,15 +172,19 @@ class TestOdirectObjectRejection:
         assert exc.value.code == EXIT_CODE.INVALID_ARGUMENTS
         captured = capsys.readouterr()
         assert '--o-direct' in captured.err
-        assert '--object' in captured.err
+        # Error must name the 'object' positional protocol — NOT '--object'
+        # which is no longer a flag (see issue #376 and the cli_parser.py
+        # comment that documents the rename). The quoted-positional form
+        # is what the user actually types.
+        assert "'object'" in captured.err
 
     def test_training_rejects_odirect_without_file(self, capsys):
-        """--o-direct without --file must be rejected: --o-direct requires --file."""
+        """--o-direct without 'file' positional must be rejected."""
         from mlpstorage_py.cli.training_args import validate_training_arguments
         from mlpstorage_py.config import EXIT_CODE
         args = Namespace(
             command='run',
-            data_access_protocol=None,  # neither --file nor --object
+            data_access_protocol=None,  # neither 'file' nor 'object'
             data_dir='/mnt/data',
             o_direct=True,
         )
@@ -189,7 +193,8 @@ class TestOdirectObjectRejection:
         assert exc.value.code == EXIT_CODE.INVALID_ARGUMENTS
         captured = capsys.readouterr()
         assert '--o-direct' in captured.err
-        assert '--file' in captured.err
+        # Quoted-positional 'file' — not the no-longer-existing --file flag.
+        assert "'file'" in captured.err
 
     def test_training_allows_odirect_plus_file(self):
         from mlpstorage_py.cli.training_args import validate_training_arguments
@@ -213,14 +218,14 @@ class TestOdirectObjectRejection:
         validate_training_arguments(args)
 
     def test_checkpointing_rejects_odirect_without_file(self, capsys):
-        """--o-direct without --file must be rejected for checkpointing too."""
+        """--o-direct without 'file' positional must be rejected for checkpointing too."""
         from mlpstorage_py.cli.checkpointing_args import validate_checkpointing_arguments
         from mlpstorage_py.config import LLM_MODELS, EXIT_CODE
         args = Namespace(
             model=LLM_MODELS[0],
             num_checkpoints_read=10,
             num_checkpoints_write=10,
-            data_access_protocol=None,  # neither --file nor --object
+            data_access_protocol=None,  # neither 'file' nor 'object'
             o_direct=True,
             mode='open',
         )
@@ -230,7 +235,8 @@ class TestOdirectObjectRejection:
         combined = capsys.readouterr()
         output = combined.out + combined.err
         assert '--o-direct' in output
-        assert '--file' in output
+        # Quoted-positional 'file' — not the no-longer-existing --file flag.
+        assert "'file'" in output
 
     def test_checkpointing_rejects_odirect_plus_object(self, capsys):
         from mlpstorage_py.cli.checkpointing_args import validate_checkpointing_arguments
