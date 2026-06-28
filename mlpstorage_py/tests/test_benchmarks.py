@@ -555,6 +555,14 @@ class TestVectorDBBenchmark:
             index_type='DISKANN',
             num_shards=1,
             vector_dtype='FLOAT_VECTOR',
+            # orgname is populated upstream by main._main_impl()'s
+            # orgname-resolution gate (from orgname.yaml written by
+            # `mlpstorage init`). Benchmark.__init__ asserts it's set.
+            # systemname / mode are likewise read by base.py during init.
+            orgname='test-org',
+            systemname='test-sys',
+            mode='whatif',
+            vdb_engine='milvus',
         )
 
         with patch.object(VectorDBBenchmark, 'verify_benchmark'):
@@ -586,6 +594,10 @@ class TestVectorDBBenchmark:
             index_type='HNSW',
             num_shards=2,
             vector_dtype='FLOAT_VECTOR',
+            orgname='test-org',
+            systemname='test-sys',
+            mode='whatif',
+            vdb_engine='milvus',
         )
 
         with patch.object(VectorDBBenchmark, 'verify_benchmark'):
