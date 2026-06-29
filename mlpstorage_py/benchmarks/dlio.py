@@ -381,6 +381,26 @@ class DLIOBenchmark(Benchmark, abc.ABC):
     _OBJECT_URI_SCHEMES = frozenset({'s3', 's3a', 'az', 'gs'})
     _LOCAL_URI_SCHEMES = frozenset({'file', 'direct'})
 
+    def _is_object_storage(self) -> bool:
+        """True when ``storage.storage_type`` resolves to an object backend.
+
+        Reads the same signal as ``_check_storage_scheme_consistency`` —
+        what we actually told DLIO to use after ``_apply_object_storage_params``
+        has run — rather than the ``data_access_protocol`` CLI positional
+        (``file|object``). That makes the check robust to the
+        ``--params storage.storage_type=s3`` path where an advanced user
+        wires up object storage manually under the ``file`` positional
+        instead of using the ``object`` positional. ``direct_fs`` (the
+        ``--o-direct`` mode) is NOT object storage — it still resolves
+        to a local path and statvfs works.
+        """
+        storage_type = (
+            self.params_dict.get('storage.storage_type')
+            or (self.combined_params or {}).get('storage', {}).get('storage_type')
+            or 'local'
+        )
+        return storage_type in self._OBJECT_STORAGE_TYPES
+
     def _check_storage_scheme_consistency(self):
         """Fail fast on storage.storage_type vs data/checkpoint folder mismatch.
 
@@ -816,13 +836,13 @@ class TrainingBenchmark(DLIOBenchmark):
         """Return ``args.data_dir`` — the training dataset destination per
         REQUIREMENTS.md CAP-01.
 
-        Object-mode runs (data_access_protocol == 'object') target an
-        ``s3://`` URI; statvfs against a URI walks to filesystem root and
-        aborts with ``[E401] CAP-01: no valid parent``. Return None to
-        fire the A8 remote-backend escape hatch in ``_pre_execution_gate``.
-        See issue #568.
+        Object-storage runs have no local filesystem to statvfs; the URI
+        parent-walk in ``check_capacity_4field`` exhausts and aborts with
+        ``[E401] CAP-01: no valid parent for s3://…``. Return ``None`` to
+        fire the A8 remote-backend escape hatch in
+        ``_pre_execution_gate``. See issue #568.
         """
-        if getattr(self.args, 'data_access_protocol', None) == 'object':
+        if self._is_object_storage():
             return None
         return self.args.data_dir
 
@@ -972,13 +992,13 @@ class CheckpointingBenchmark(DLIOBenchmark):
         upstream CLI validation already requires checkpoint_folder for
         real runs; this is defensive.
         """
+        # Object-storage runs target an s3:// URI; statvfs walks to root
+        # and aborts with [E401] CAP-01: no valid parent. A8 escape hatch —
+        # see issue #568.
+        if self._is_object_storage():
+            return None
         cf = getattr(self.args, "checkpoint_folder", None)
         if not cf:
-            return None
-        # Object-mode runs target an s3:// URI; statvfs against a URI
-        # walks to filesystem root and aborts with [E401] CAP-01: no
-        # valid parent. A8 escape hatch — see issue #568.
-        if getattr(self.args, 'data_access_protocol', None) == 'object':
             return None
         return os.path.join(cf, self.args.model)
 
