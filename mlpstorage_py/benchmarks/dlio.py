@@ -371,6 +371,8 @@ class DLIOBenchmark(Benchmark, abc.ABC):
             actual=actual,
             suggestion=suggestion,
             code=ErrorCode.CONFIG_FILE_NOT_FOUND,
+        )
+
     # ── Issue #538: scheme-mismatch guardrail ────────────────────────────
     # Recognized schemes. "Object" = anything DLIO routes through
     # ObjStoreLibStorage; "local" = anything that resolves to a POSIX path.
