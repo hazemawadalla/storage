@@ -3857,3 +3857,163 @@ class TestTagOutputRegexParsesOpenMpi4xPrefix:
         stripped = _strip_tag_output_prefix(payload_raw)
         parsed = json.loads(stripped)
         assert parsed.get("status") == "ok"
+
+
+class TestRank0JsonStaysUnderPipeBuf:
+    """Regression for issue #573: at scale (>=~40 ranks) the rank-0 JSON
+    line exceeded PIPE_BUF (4096 bytes), the I/O-forwarding write stopped
+    being atomic, the launcher's marker regex captured a truncated line,
+    and json.loads failed at char 4095 with
+    ``Expecting ',' delimiter: line 1 column 4096``.
+
+    Root cause: the emitted ``_result`` dict embedded ``all_payloads``
+    (one ~60-byte dict per rank) under the ``"ranks"`` key. The launcher
+    never reads ``"ranks"`` — only ``status``, ``failure_summary``,
+    ``unlink_warning`` (see cluster_collector.py:3625-3631), so the array
+    was wire overhead with no consumer.
+
+    Fix: drop ``"ranks"`` from the printed result so the line stays
+    small at any rank count. This class locks BOTH the shape (no
+    ``"ranks"`` key on the wire) and the size (well under PIPE_BUF
+    at 256 ranks).
+    """
+
+    # POSIX PIPE_BUF on Linux. The kernel only guarantees atomicity for
+    # writes <= PIPE_BUF; beyond that, interleaving / partial writes can
+    # truncate at exactly this byte. The probe's single-line print is
+    # the wire format the launcher reads back via subprocess.run().
+    _PIPE_BUF = 4096
+
+    def _exec_probe_with_payloads(self, tmp_path, monkeypatch, payloads):
+        """Exec the probe script with mpi4py stubbed to feed ``payloads``
+        as the rank-0 gather result; return captured stdout."""
+        import contextlib
+        import io
+        import sys
+        from unittest.mock import MagicMock
+
+        fake_comm = MagicMock()
+        fake_comm.Get_rank.return_value = 0
+        fake_comm.Get_size.return_value = len(payloads)
+        fake_comm.gather.return_value = payloads
+        fake_comm.bcast.side_effect = lambda v, root=0: v
+        fake_comm.Barrier.return_value = None
+
+        fake_mpi_module = MagicMock()
+        fake_mpi_module.COMM_WORLD = fake_comm
+        fake_mpi4py_pkg = MagicMock()
+        fake_mpi4py_pkg.MPI = fake_mpi_module
+        monkeypatch.setitem(sys.modules, 'mpi4py', fake_mpi4py_pkg)
+        monkeypatch.setitem(sys.modules, 'mpi4py.MPI', fake_mpi_module)
+
+        monkeypatch.setattr(
+            sys, 'argv',
+            ['probe', str(tmp_path), 'pipe-buf-regression-uuid'],
+        )
+
+        import time as _time
+        monkeypatch.setattr(_time, 'sleep', lambda *_a, **_kw: None)
+
+        from mlpstorage_py.cluster_collector import SHARED_FS_PROBE_SCRIPT
+
+        captured = io.StringIO()
+        with contextlib.redirect_stdout(captured):
+            try:
+                exec(SHARED_FS_PROBE_SCRIPT, {'__name__': '__main__'})
+            except SystemExit:
+                pass
+        return captured.getvalue()
+
+    def _extract_payload(self, stdout_content):
+        import re
+        m = re.search(
+            r'__CAP02_RESULT_BEGIN__\s*\n(.*?)\n.*?__CAP02_RESULT_END__',
+            stdout_content,
+            re.DOTALL,
+        )
+        assert m is not None, (
+            f'rank 0 must emit framed payload; got: {stdout_content!r}'
+        )
+        return m.group(1).strip()
+
+    def test_emitted_json_excludes_ranks_array(self, tmp_path, monkeypatch):
+        """Shape lock: the wire format must not carry per-rank dicts.
+        The launcher never reads ``"ranks"``; dropping it is the only
+        way to bound the wire size at scale (issue #573)."""
+        import json as _json
+
+        # A modest fleet — enough to populate gather but well under any
+        # truncation threshold. This test is about SHAPE, not size.
+        payloads = [
+            {'hostname': f'h{i}', 'rank': i, 'failure': None,
+             'st_dev': 64512, 'st_ino': 1234567}
+            for i in range(4)
+        ]
+        stdout = self._exec_probe_with_payloads(tmp_path, monkeypatch, payloads)
+        payload = _json.loads(self._extract_payload(stdout))
+
+        assert 'ranks' not in payload, (
+            'Issue #573: per-rank "ranks" array must NOT be emitted on '
+            'the wire — at scale it pushes the line past PIPE_BUF and '
+            'the launcher reads a truncated JSON. The launcher never '
+            'consumes this field (cluster_collector.py:3625-3631), so '
+            'shipping it serves no purpose. '
+            f'Got keys: {sorted(payload.keys())}'
+        )
+        # Consumed fields must still be present.
+        assert 'status' in payload
+        assert 'failure_summary' in payload
+        assert 'unlink_warning' in payload
+
+    def test_wire_line_stays_under_pipe_buf_at_256_ranks(
+        self, tmp_path, monkeypatch
+    ):
+        """Size lock: 256 ranks must serialize to well under PIPE_BUF.
+        With the legacy ``"ranks"`` field this line was ~15-20 KB; after
+        the fix it is a tiny constant regardless of rank count."""
+        payloads = [
+            {'hostname': f'host-{i:04d}', 'rank': i, 'failure': None,
+             'st_dev': 64512, 'st_ino': 1234567}
+            for i in range(256)
+        ]
+        stdout = self._exec_probe_with_payloads(tmp_path, monkeypatch, payloads)
+        payload_line = self._extract_payload(stdout)
+
+        # Generous bound — the post-fix payload is well under 200 bytes
+        # at any rank count. PIPE_BUF is the hard kernel-atomicity ceiling.
+        assert len(payload_line.encode('utf-8')) < self._PIPE_BUF, (
+            f'Issue #573: probe wire payload is {len(payload_line)} bytes at '
+            f'256 ranks; PIPE_BUF is {self._PIPE_BUF}. At this size the I/O '
+            'forwarder will truncate the line and the launcher will hit '
+            'json.loads with a half-parsed JSON. '
+            f'Payload preview: {payload_line[:200]!r}...'
+        )
+
+    def test_failure_path_also_excludes_ranks_array(self, tmp_path, monkeypatch):
+        """The strip applies on every code path — including failure. A
+        cardinality-mismatch failure with hundreds of ranks would
+        otherwise re-introduce the truncation bug on the failure leg."""
+        import json as _json
+
+        # Build a cardinality-mismatch: 8 ranks, half on each side of a
+        # boundary. ``st_ino`` divergence is what the post-#566 identity
+        # check reads to declare failure.
+        payloads = [
+            {'hostname': f'h{i}', 'rank': i, 'failure': None,
+             'st_dev': 64512, 'st_ino': 1111111 if i < 4 else 2222222}
+            for i in range(8)
+        ]
+        stdout = self._exec_probe_with_payloads(tmp_path, monkeypatch, payloads)
+        payload = _json.loads(self._extract_payload(stdout))
+
+        assert payload['status'] == 'fail', (
+            f'cardinality mismatch must produce status=fail; got {payload!r}'
+        )
+        assert 'ranks' not in payload, (
+            'failure path must not regress the #573 fix; '
+            f'got keys: {sorted(payload.keys())}'
+        )
+        # The user-facing message must still survive — failure_summary
+        # is the only channel for per-rank detail after the fix.
+        assert payload['failure_summary'] is not None
+        assert payload['failure_summary'].get('message')
