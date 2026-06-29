@@ -21,6 +21,8 @@ from mlpstorage_py.validation_helpers import (
     _requires_mpi,
     _is_distributed_run,
     _requires_dlio,
+    _is_object_storage,
+    _validate_paths,
 )
 from mlpstorage_py.errors import DependencyError, MPIError, ConfigurationError
 
@@ -115,6 +117,163 @@ class TestRequiresDlio:
         """Should return False when program not set."""
         args = Namespace()
         assert _requires_dlio(args) is False
+
+
+class TestIsObjectStorage:
+    """Tests for _is_object_storage helper function.
+
+    Regression coverage for issue #584: the helper used to recognize object
+    mode only via ``--params storage.storage_type=s3`` or an ``s3://``-scheme
+    data path. It did NOT consult ``args.data_access_protocol == 'object'``
+    — the canonical signal set by the ``object`` positional. A bare
+    ``mlpstorage … run object --data-dir data/unet3d …`` therefore fell
+    through to local-filesystem checks and failed with ``[E401] Data
+    directory not found``, even though the run is genuinely object-mode.
+
+    Note on coverage scope: ``storage.storage_type=s3`` is injected into
+    ``DLIOBenchmark.params_dict`` by ``_apply_object_storage_params`` AFTER
+    argument parsing — it never reaches ``args.params`` for a bare
+    ``--object`` invocation, which is exactly why the
+    ``data_access_protocol`` gate is load-bearing.
+    """
+
+    def test_data_access_protocol_object_returns_true(self):
+        """#584 regression: bare ``object`` positional must be recognised."""
+        args = Namespace(data_access_protocol='object', params=[], data_dir='data/unet3d')
+        assert _is_object_storage(args) is True
+
+    def test_data_access_protocol_file_returns_false(self):
+        """File mode with a local data_dir must NOT be misclassified."""
+        args = Namespace(data_access_protocol='file', params=[], data_dir='/tmp/local')
+        assert _is_object_storage(args) is False
+
+    def test_data_access_protocol_missing_falls_through(self):
+        """No data_access_protocol attr → fall through to legacy signals."""
+        args = Namespace(params=[], data_dir='/tmp/local')
+        assert _is_object_storage(args) is False
+
+    def test_params_storage_type_s3_returns_true(self):
+        """Legacy signal still works: --params storage.storage_type=s3."""
+        args = Namespace(
+            data_access_protocol=None,
+            params=['storage.storage_type=s3'],
+            data_dir='/tmp/local',
+        )
+        assert _is_object_storage(args) is True
+
+    def test_params_storage_type_object_returns_true(self):
+        """Legacy signal also accepts storage.storage_type=object."""
+        args = Namespace(
+            data_access_protocol=None,
+            params=['storage.storage_type=object'],
+            data_dir='/tmp/local',
+        )
+        assert _is_object_storage(args) is True
+
+    def test_s3_uri_scheme_on_data_dir_returns_true(self):
+        """Legacy signal still works: s3:// scheme on data_dir."""
+        args = Namespace(
+            data_access_protocol=None,
+            params=[],
+            data_dir='s3://bucket/path',
+        )
+        assert _is_object_storage(args) is True
+
+    def test_s3_uri_scheme_on_checkpoint_folder_returns_true(self):
+        """Legacy signal still works: s3:// scheme on checkpoint_folder."""
+        args = Namespace(
+            data_access_protocol=None,
+            params=[],
+            checkpoint_folder='s3://bucket/checkpoints',
+        )
+        assert _is_object_storage(args) is True
+
+    def test_unrelated_params_returns_false(self):
+        """Unrelated --params entries must not flip the gate."""
+        args = Namespace(
+            data_access_protocol='file',
+            params=['dataset.num_files_train=1000', 'dataset.num_subfolders_train=5'],
+            data_dir='/tmp/local',
+        )
+        assert _is_object_storage(args) is False
+
+    def test_empty_args_returns_false(self):
+        """Defensive: missing every signal must not raise, must return False."""
+        args = Namespace()
+        assert _is_object_storage(args) is False
+
+
+class TestValidatePathsObjectStorageBypass:
+    """Integration coverage for the #584 fix: ``_validate_paths`` must
+    early-return for object-mode runs so a non-existent local data_dir
+    does NOT raise FS_PATH_NOT_FOUND.
+
+    Pre-fix: a bare ``--object --data-dir data/unet3d`` invocation reached
+    ``os.path.exists('data/unet3d')`` (the path is conceptually a bucket
+    key, not a local path) and validation raised E401. The fix routes the
+    canonical ``data_access_protocol == 'object'`` signal through
+    ``_is_object_storage`` so the early return at the top of
+    ``_validate_paths`` fires.
+    """
+
+    def test_object_mode_with_nonexistent_data_dir_returns_no_errors(self):
+        """The exact storage#584 reproducer config: ``object`` positional,
+        bare relative data_dir that doesn't exist on the local FS, no
+        ``--params`` injected. Pre-fix this returned an E401 error;
+        post-fix it must return an empty error list."""
+        args = Namespace(
+            command='run',
+            data_access_protocol='object',
+            params=[],
+            data_dir='data/unet3d',  # does not exist locally — it's a bucket key
+            checkpoint_folder=None,
+            results_dir=None,
+            config_file=None,
+        )
+        errors = _validate_paths(args)
+        assert errors == [], (
+            "Issue #584 regression: object-mode runs with a non-existent "
+            "local data_dir path must early-return from _validate_paths. "
+            f"Got errors: {errors!r}"
+        )
+
+    def test_file_mode_with_nonexistent_data_dir_still_errors(self):
+        """Guardrail: file mode still raises when data_dir is missing.
+        The fix must not silently broaden the bypass."""
+        args = Namespace(
+            command='run',
+            data_access_protocol='file',
+            params=[],
+            data_dir='/nonexistent/local/path/that/does/not/exist',
+            checkpoint_folder=None,
+            results_dir=None,
+            config_file=None,
+        )
+        errors = _validate_paths(args)
+        assert len(errors) >= 1, (
+            "File mode must still report missing data_dir; the object-mode "
+            "bypass must not leak. Got: %r" % errors
+        )
+        assert any("Data directory not found" in str(e) for e in errors)
+
+    def test_object_mode_skips_checkpoint_parent_check(self):
+        """The checkpoint parent-dir check at validation_helpers.py:215-223
+        is the second site the reporter mentions — it must also be bypassed
+        for object mode, since object-mode checkpoint paths are bucket keys."""
+        args = Namespace(
+            command='run',
+            data_access_protocol='object',
+            params=[],
+            data_dir=None,
+            checkpoint_folder='checkpoints/llama3-8b',  # bucket key, no local parent
+            results_dir=None,
+            config_file=None,
+        )
+        errors = _validate_paths(args)
+        assert errors == [], (
+            "Object-mode checkpoint paths are bucket keys; the local parent-dir "
+            "check must be bypassed. Got: %r" % errors
+        )
 
 
 class TestValidateBenchmarkEnvironment:
