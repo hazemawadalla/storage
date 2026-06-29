@@ -1609,6 +1609,9 @@ class TestPhase5Cap01:
 
         bm = MagicMock(spec=CheckpointingBenchmark)
         bm.args = SimpleNamespace(checkpoint_folder='/tmp/ck', model='llama3-8b')
+        # Issue #568: isolate from _is_object_storage so this A7 lock
+        # holds for the local path regardless of the helper.
+        bm._is_object_storage = MagicMock(return_value=False)
         result = CheckpointingBenchmark._capacity_gate_destination(bm)
         assert result == _os.path.join('/tmp/ck', 'llama3-8b')
 
