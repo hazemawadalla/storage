@@ -371,6 +371,135 @@ class DLIOBenchmark(Benchmark, abc.ABC):
             actual=actual,
             suggestion=suggestion,
             code=ErrorCode.CONFIG_FILE_NOT_FOUND,
+    # ── Issue #538: scheme-mismatch guardrail ────────────────────────────
+    # Recognized schemes. "Object" = anything DLIO routes through
+    # ObjStoreLibStorage; "local" = anything that resolves to a POSIX path.
+    _OBJECT_STORAGE_TYPES = frozenset({'s3', 's3_torch'})
+    _OBJECT_URI_SCHEMES = frozenset({'s3', 's3a', 'az', 'gs'})
+    _LOCAL_URI_SCHEMES = frozenset({'file', 'direct'})
+
+    def _check_storage_scheme_consistency(self):
+        """Fail fast on storage.storage_type vs data/checkpoint folder mismatch.
+
+        Issue #538: when ``storage.storage_type`` disagrees on scheme with
+        ``dataset.data_folder`` or ``checkpoint.checkpoint_folder``, DLIO's
+        ``StorageFactory.get_storage`` still picks the backend off the
+        global ``storage_type`` (not off the per-folder URI scheme) and
+        runs ``ObjStoreLibStorage._preflight()`` against the unrelated
+        folder. All MPI ranks then die at startup inside s3dlio with
+        either:
+
+            cannot reach bucket '/mnt/.../retinanet_checkpoints' via s3dlio
+            Bucket name cannot be empty in URI: s3://file:///mnt/.../...
+
+        The same failure shape exists for both the dataset path
+        (``datagen``/``run``) and the checkpoint path (any benchmark with
+        checkpointing enabled). The real fix lives in DLIO — parse each
+        folder's scheme in ``StorageFactory.get_storage`` rather than
+        routing off the global storage_type. Until that lands, refuse
+        mismatched combinations here so a 32-rank job doesn't spend a
+        minute spinning up only to crash in the preflight.
+
+        The check is intentionally narrow: bare relative prefixes (the
+        workload-YAML default, e.g. ``checkpoints/llama_8b``) are valid
+        under both backends and pass through.
+        """
+        command = getattr(self.args, 'command', None)
+        if command not in ('datagen', 'run', 'configview'):
+            return
+
+        storage_type = (
+            self.params_dict.get('storage.storage_type')
+            or (self.combined_params or {}).get('storage', {}).get('storage_type')
+            or 'local'
+        )
+        is_object_storage = storage_type in self._OBJECT_STORAGE_TYPES
+
+        # Always inspect the dataset path — DLIO's data StorageFactory is
+        # constructed for every command that touches data.
+        self._enforce_scheme_match(
+            param_key='dataset.data_folder',
+            yaml_path=('dataset', 'data_folder'),
+            storage_type=storage_type,
+            is_object_storage=is_object_storage,
+        )
+
+        # Inspect the checkpoint path only when checkpointing actually runs.
+        # CheckpointingBenchmark is always-on; TrainingBenchmark honors
+        # workflow.checkpoint (datagen never checkpoints).
+        if command == 'datagen':
+            return
+        checkpoint_on = self.BENCHMARK_TYPE == BENCHMARK_TYPES.checkpointing
+        if not checkpoint_on:
+            workflow = (self.combined_params or {}).get('workflow') or {}
+            checkpoint_on = bool(workflow.get('checkpoint', False))
+        if checkpoint_on:
+            self._enforce_scheme_match(
+                param_key='checkpoint.checkpoint_folder',
+                yaml_path=('checkpoint', 'checkpoint_folder'),
+                storage_type=storage_type,
+                is_object_storage=is_object_storage,
+            )
+
+    def _enforce_scheme_match(self, *, param_key, yaml_path, storage_type,
+                              is_object_storage):
+        """Raise if the resolved folder's scheme contradicts storage_type."""
+        folder = self.params_dict.get(param_key)
+        if folder is None:
+            node = self.combined_params or {}
+            for k in yaml_path:
+                node = (node or {}).get(k)
+                if node is None:
+                    break
+            folder = node
+        if not folder:
+            return
+        folder_str = str(folder).strip()
+        if not folder_str:
+            return
+
+        scheme = ''
+        if '://' in folder_str:
+            scheme = folder_str.split('://', 1)[0].lower()
+
+        looks_local = (
+            scheme in self._LOCAL_URI_SCHEMES
+            or (not scheme and folder_str.startswith('/'))
+        )
+        looks_object = scheme in self._OBJECT_URI_SCHEMES
+
+        if is_object_storage and looks_local:
+            detail = (
+                f"storage.storage_type={storage_type!r} selects object storage, "
+                f"but {param_key}={folder_str!r} is a local filesystem path or "
+                "file:// URI."
+            )
+            fix = (
+                f"  - point {param_key} at the object store "
+                "(e.g. s3://<bucket>/<prefix>), or\n"
+                "  - drop storage.storage_type=s3 / --object so data and "
+                "checkpoints use a local filesystem backend."
+            )
+        elif (not is_object_storage) and looks_object:
+            detail = (
+                f"storage.storage_type={storage_type!r} selects local storage, "
+                f"but {param_key}={folder_str!r} is an object-store URI."
+            )
+            fix = (
+                "  - set storage.storage_type=s3 (and the matching "
+                "storage_options) to target object storage, or\n"
+                f"  - point {param_key} at a local path."
+            )
+        else:
+            return
+
+        raise ValueError(
+            "Inconsistent storage configuration: " + detail + "\n"
+            "DLIO picks the storage backend from the global "
+            "storage.storage_type, then runs the obj_store_lib preflight "
+            f"against {param_key} using that backend. A mismatched scheme "
+            "crashes every MPI rank inside s3dlio at startup (see "
+            "mlcommons/storage#538). Either:\n" + fix
         )
 
     def process_dlio_params(self, config_file):
@@ -505,6 +634,7 @@ class TrainingBenchmark(DLIOBenchmark):
             # The add_datadir_param would convert --data-dir to --dataset.data_folder which is invalid to
             # mlpstorage.
             self.add_datadir_param()
+        self._check_storage_scheme_consistency()
         self.logger.verboser(f'Instantiated the Training Benchmark...')
 
     def add_datadir_param(self):
@@ -739,6 +869,7 @@ class CheckpointingBenchmark(DLIOBenchmark):
         self._apply_odirect_params(storage_root=getattr(self.args, 'checkpoint_folder', None))
         self.verify_benchmark()
         self.add_checkpoint_params()
+        self._check_storage_scheme_consistency()
         self.logger.status(f'Instantiated the Checkpointing Benchmark...')
 
     def add_checkpoint_params(self):
