@@ -3602,6 +3602,162 @@ class TestSharedFsProbeNonRank0Silence:
             )
 
 
+class TestStageScriptPreservesBasename:
+    """Regression for issue #569: the SSH/SCP staging helper must place the
+    script at ``remote_dir/<basename(script_local_path)>``, NOT at the
+    hardcoded ``remote_dir/mlps_collector.py``.
+
+    The CAP-02 shared-FS probe stages a script named ``mlps_cap02_probe.py``
+    via the same helper. Pre-fix, the file landed remotely as
+    ``mlps_collector.py`` while the launcher pointed ``mpirun`` at
+    ``mlps_cap02_probe.py`` — the probe failed remotely with ENOENT and
+    the symptoms were visible in the field as a CAP-02 staging hang.
+
+    This test mocks subprocess.run and asserts the scp destination path
+    uses the local script's basename verbatim.
+    """
+
+    def test_scp_destination_uses_local_basename(self, tmp_path):
+        from mlpstorage_py.cluster_collector import MPIClusterCollector
+
+        local_script = tmp_path / "mlps_cap02_probe.py"
+        local_script.write_text("# probe\n")
+
+        captured_scp_targets = []
+
+        def fake_run(cmd, *args, **kwargs):
+            if cmd and cmd[0] == "scp":
+                captured_scp_targets.append(cmd[-1])
+            result = MagicMock()
+            result.returncode = 0
+            result.stdout = ""
+            result.stderr = ""
+            return result
+
+        coll = MPIClusterCollector(
+            hosts=["remote-host"],
+            mpi_bin="mpirun",
+            logger=MagicMock(),
+            results_dir=str(tmp_path),
+        )
+
+        with patch(
+            "mlpstorage_py.cluster_collector.subprocess.run",
+            side_effect=fake_run,
+        ):
+            coll._stage_script_on_remote_hosts(
+                script_local_path=str(local_script),
+                remote_dir="/tmp/staging",
+                hosts=["remote-host"],
+            )
+
+        assert len(captured_scp_targets) == 1, (
+            f"expected exactly one scp call; got {captured_scp_targets!r}"
+        )
+        target = captured_scp_targets[0]
+        assert target.endswith("/mlps_cap02_probe.py"), (
+            "Issue #569: scp destination must preserve the local basename "
+            "(mlps_cap02_probe.py), not the hardcoded mlps_collector.py. "
+            f"Got: {target!r}"
+        )
+        assert "mlps_collector.py" not in target, (
+            f"scp destination must NOT collapse to mlps_collector.py; got: {target!r}"
+        )
+
+
+class TestSharedFsProbeIgnoresStDevAcrossHosts:
+    """Regression for issue #566: the CAP-02 probe must NOT include st_dev
+    in the cross-host identity check.
+
+    st_dev is the kernel's per-mount device id. On FUSE / distributed
+    filesystems (DAOS DFuse, NFS, Lustre, GPFS, BeeGFS, ...) the same
+    shared mount gets a different st_dev on every node because each node
+    runs its own mount instance. st_ino IS identical cluster-wide because
+    it is derived from the underlying object/inode identity.
+
+    Pre-fix behavior (the bug): rank 0 gathered (st_dev, st_ino) tuples
+    from every rank and rejected the run unless all tuples were identical,
+    which made CAP-02 unsatisfiable on FUSE — blocking every multi-host
+    DAOS / NFS / Lustre run.
+
+    Post-fix behavior (locked by this test): rank 0 must succeed (status
+    "ok", no failure_summary) when every rank reports the same st_ino,
+    even with mismatched st_dev values.
+    """
+
+    def test_same_st_ino_different_st_dev_succeeds(self, tmp_path, monkeypatch):
+        import contextlib
+        import io
+        import json
+        import re
+        import sys
+        from unittest.mock import MagicMock
+
+        # Build the exact bad-tuple-good-inode shape from the issue:
+        #   host=R2-06 rank=0 st_dev=46 st_ino=281482956119445
+        #   host=R2-05 rank=1 st_dev=47 st_ino=281482956119445  (different st_dev)
+        fake_comm = MagicMock()
+        fake_comm.Get_rank.return_value = 0
+        fake_comm.Get_size.return_value = 2
+        fake_comm.gather.return_value = [
+            {"hostname": "R2-06", "rank": 0, "failure": None,
+             "st_dev": 46, "st_ino": 281482956119445},
+            {"hostname": "R2-05", "rank": 1, "failure": None,
+             "st_dev": 47, "st_ino": 281482956119445},
+        ]
+        fake_comm.bcast.side_effect = lambda v, root=0: v
+        fake_comm.Barrier.return_value = None
+
+        fake_mpi_module = MagicMock()
+        fake_mpi_module.COMM_WORLD = fake_comm
+        fake_mpi4py_pkg = MagicMock()
+        fake_mpi4py_pkg.MPI = fake_mpi_module
+        monkeypatch.setitem(sys.modules, "mpi4py", fake_mpi4py_pkg)
+        monkeypatch.setitem(sys.modules, "mpi4py.MPI", fake_mpi_module)
+
+        monkeypatch.setattr(
+            sys, "argv",
+            ["probe", str(tmp_path), "fuse-st-dev-mismatch-uuid"],
+        )
+
+        import time as _time
+        monkeypatch.setattr(_time, "sleep", lambda *_a, **_kw: None)
+
+        from mlpstorage_py.cluster_collector import SHARED_FS_PROBE_SCRIPT
+
+        captured = io.StringIO()
+        exit_code = None
+        with contextlib.redirect_stdout(captured):
+            try:
+                exec(SHARED_FS_PROBE_SCRIPT, {"__name__": "__main__"})
+            except SystemExit as se:
+                exit_code = se.code
+
+        stdout_content = captured.getvalue()
+        m = re.search(
+            r"__CAP02_RESULT_BEGIN__\s*\n(.*?)\n.*?__CAP02_RESULT_END__",
+            stdout_content,
+            re.DOTALL,
+        )
+        assert m is not None, (
+            "rank 0 must always emit framed payload on stdout; "
+            f"got: {stdout_content!r}"
+        )
+        payload = json.loads(m.group(1).strip())
+
+        assert payload["status"] == "ok", (
+            "Issue #566: same st_ino with different st_dev must be treated as "
+            "shared FS (FUSE / DAOS / NFS / Lustre all assign st_dev per-node). "
+            f"Got payload: {payload!r}"
+        )
+        assert payload["failure_summary"] is None, (
+            f"failure_summary must be None on success; got: {payload['failure_summary']!r}"
+        )
+        assert exit_code in (0, None), (
+            f"probe must sys.exit(0) on ok status; got exit_code={exit_code!r}"
+        )
+
+
 class TestTagOutputRegexParsesOpenMpi4xPrefix:
     """HARDEN-04 regression guard: the CAP-02 launcher's tag-strip regex
     must consume the OpenMPI 4.x --tag-output prefix format
