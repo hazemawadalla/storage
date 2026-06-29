@@ -386,12 +386,13 @@ class DLIOBenchmark(Benchmark, abc.ABC):
 
         Reads the same signal as ``_check_storage_scheme_consistency`` —
         what we actually told DLIO to use after ``_apply_object_storage_params``
-        has run — rather than the user-facing ``data_access_protocol`` CLI
-        positional. That makes the check robust to the
-        ``--params storage.storage_type=s3`` path where a user wires up
-        object storage without passing ``--object``. ``direct_fs`` (the
-        ``--o-direct`` mode) is NOT object storage — it still resolves to
-        a local path and statvfs works.
+        has run — rather than the ``data_access_protocol`` CLI positional
+        (``file|object``). That makes the check robust to the
+        ``--params storage.storage_type=s3`` path where an advanced user
+        wires up object storage manually under the ``file`` positional
+        instead of using the ``object`` positional. ``direct_fs`` (the
+        ``--o-direct`` mode) is NOT object storage — it still resolves
+        to a local path and statvfs works.
         """
         storage_type = (
             self.params_dict.get('storage.storage_type')

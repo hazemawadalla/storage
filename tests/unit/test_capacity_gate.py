@@ -552,10 +552,11 @@ class TestDLIOIsObjectStorage:
     to decide whether to skip the local statvfs gate.
 
     Reads ``storage.storage_type`` (the value we actually hand to DLIO
-    after ``_apply_object_storage_params`` has run), not the user-facing
-    ``data_access_protocol`` CLI positional. That makes the gate skip
-    even for the ``--params storage.storage_type=s3`` edge case where
-    a user wires up object storage without passing ``--object``.
+    after ``_apply_object_storage_params`` has run), not the
+    ``data_access_protocol`` CLI positional (``file|object``). That makes
+    the gate skip even for the ``--params storage.storage_type=s3`` edge
+    case where an advanced user wires up object storage manually under
+    the ``file`` positional instead of using the ``object`` positional.
     """
 
     @staticmethod
@@ -622,15 +623,16 @@ class TestDLIOIsObjectStorage:
         )
         assert DLIOBenchmark._is_object_storage(bm) is True
 
-    def test_storage_type_set_via_params_without_object_flag(self):
+    def test_storage_type_set_via_params_under_file_positional(self):
         """Locks the edge case the data_access_protocol signal would
-        miss: a user passes `--params storage.storage_type=s3` without
-        the `--object` positional. The gate must still skip — there's
-        no local filesystem to statvfs regardless of which CLI knob
-        the user turned."""
+        miss: an advanced user passes the `file` positional but adds
+        `--params storage.storage_type=s3` (and the matching storage_root
+        / storage_options) to wire up object storage manually. The gate
+        must still skip — there's no local filesystem to statvfs
+        regardless of which CLI form the user took to get there."""
         from mlpstorage_py.benchmarks.dlio import DLIOBenchmark
         bm = self._bm_with_state(params_dict={'storage.storage_type': 's3'})
-        # Even with data_access_protocol='file' on args, the resolved
+        # Even with the file positional resolved onto args, the resolved
         # storage_type wins.
         bm.args = SimpleNamespace(data_access_protocol='file')
         assert DLIOBenchmark._is_object_storage(bm) is True
