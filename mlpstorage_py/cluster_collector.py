@@ -2516,8 +2516,12 @@ if __name__ == '__main__':
 # per benchmark instance from `_pre_execution_gate`, after the CAP-01
 # capacity check; rank 0 creates a per-run-uuid-suffixed sentinel file in the
 # dataset destination, every rank `os.stat`s it, the MPI gather collects
-# (st_dev, st_ino) tuples to rank 0, rank 0 enforces cardinality exactly 1
-# (or fails fast with each hostname's reported tuple), unlinks in a finally
+# (st_dev, st_ino) tuples to rank 0, rank 0 enforces st_ino cardinality
+# exactly 1 (or fails fast with each hostname's reported tuple — st_dev is
+# still reported in the diagnostic since it can help operators triage
+# mismatched mounts, but it is NOT used in the equality check because
+# FUSE / distributed FS mount device ids legitimately differ per node),
+# unlinks in a finally
 # block, sleeps 5.0s for storage quiesce (D-49), and all ranks reach a final
 # MPI_Barrier so the measured workload starts simultaneously.
 #
@@ -2780,9 +2784,17 @@ def main():
                     "message": _build_per_rank_message(all_payloads),
                 }
             else:
+                # NOTE: st_dev is intentionally excluded. It is the kernel's
+                # per-mount device id, assigned per-node, and legitimately
+                # differs across hosts on FUSE / distributed filesystems
+                # (DAOS DFuse, NFS, Lustre, GPFS, BeeGFS, ...) even when
+                # every rank stats the same shared sentinel. st_ino is the
+                # cross-host identity signal: if all ranks see the same
+                # inode for rank 0's unique sentinel, the data-dir is
+                # genuinely shared. See issue #566.
                 ids = set()
                 for p in all_payloads:
-                    ids.add((p.get("st_dev"), p.get("st_ino")))
+                    ids.add(p.get("st_ino"))
                 if len(ids) != 1:
                     status = "fail"
                     rank0_failure_summary = {
@@ -3045,8 +3057,8 @@ class MPIClusterCollector:
         Args:
             script_local_path: Path to the collector script on the launch host.
             remote_dir: Absolute directory to create on each remote host; the
-                script will be placed at ``remote_dir/mlps_collector.py``. The
-                same absolute path is used on every node so the ``mpirun``
+                script will be placed at ``remote_dir/<basename(script_local_path)>``.
+                The same absolute path is used on every node so the ``mpirun``
                 command line is identical everywhere.
             hosts: Remote hostnames to stage to. Callers should pass the result
                 of :meth:`_remote_hosts_needing_staging` to avoid SSHing to the
@@ -3071,9 +3083,13 @@ class MPIClusterCollector:
                 if r.returncode != 0:
                     return host, f"ssh mkdir failed: {r.stderr.strip() or r.stdout.strip()}"
 
+                # Preserve the local script's basename on the remote so
+                # callers staging a non-default name (e.g. the CAP-02 probe
+                # which uses `mlps_cap02_probe.py`) get the file at the path
+                # they expect to invoke. See issue #569.
                 scp_cmd = [
                     "scp", *ssh_common, script_local_path,
-                    f"{target}:{remote_dir}/mlps_collector.py",
+                    f"{target}:{remote_dir}/{os.path.basename(script_local_path)}",
                 ]
                 r = subprocess.run(
                     scp_cmd, capture_output=True, text=True,
