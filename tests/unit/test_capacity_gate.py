@@ -40,7 +40,15 @@ import pytest
 # tests/unit/test_benchmarks_kvcache.py.
 import importlib.util as _ilu
 for _dep in ("pyarrow", "pyarrow.ipc", "psutil"):
-    if _ilu.find_spec(_dep) is None and _dep not in sys.modules:
+    if _dep in sys.modules:
+        continue
+    try:
+        _spec = _ilu.find_spec(_dep)
+    except (ModuleNotFoundError, ValueError):
+        # Parent already stubbed above (pyarrow → MagicMock), so find_spec
+        # for the submodule walks into the mock and raises. Treat as missing.
+        _spec = None
+    if _spec is None:
         sys.modules[_dep] = MagicMock()
 
 from mlpstorage_py.benchmarks.base import Benchmark
@@ -325,6 +333,35 @@ class TestTrainingBenchmarkRequiredBytes:
         bm.args = SimpleNamespace(data_dir="/data/foo")
         assert TrainingBenchmark._capacity_gate_destination(bm) == "/data/foo"
 
+    def test_destination_is_none_in_object_mode(self):
+        """Issue #568: CAP-01 must fire the A8 escape hatch when the
+        destination is an object-storage URI. statvfs on s3:// walks the
+        parent chain to the filesystem root and aborts with
+        ``[E401] CAP-01: no valid parent for s3://…``. ``data_access_protocol
+        == 'object'`` is the same signal _apply_object_storage_params keys on,
+        so returning None here mirrors the existing VectorDB/KVCache hatch.
+        """
+        from mlpstorage_py.benchmarks.dlio import TrainingBenchmark
+
+        bm = MagicMock(spec=TrainingBenchmark)
+        bm.args = SimpleNamespace(
+            data_dir="s3://mybucket/unet3d/data",
+            data_access_protocol="object",
+        )
+        assert TrainingBenchmark._capacity_gate_destination(bm) is None
+
+    def test_destination_is_data_dir_when_protocol_attribute_missing(self):
+        """Defensive: not every code path attaches data_access_protocol to
+        args (older test fixtures, internal callers). Absence must NOT be
+        interpreted as object mode — fall through to the existing local
+        statvfs path.
+        """
+        from mlpstorage_py.benchmarks.dlio import TrainingBenchmark
+
+        bm = MagicMock(spec=TrainingBenchmark)
+        bm.args = SimpleNamespace(data_dir="/data/foo")
+        assert TrainingBenchmark._capacity_gate_destination(bm) == "/data/foo"
+
     def test_datasize_invokes_pre_execution_gate_before_calculate_training_data_size(self):
         from mlpstorage_py.benchmarks.dlio import TrainingBenchmark
 
@@ -501,6 +538,34 @@ class TestCheckpointingBenchmarkRequiredBytes:
         bm.args = SimpleNamespace(checkpoint_folder=None, model="llama3-8b")
         result = CheckpointingBenchmark._capacity_gate_destination(bm)
         assert result is None
+
+    def test_destination_is_none_in_object_mode(self):
+        """Issue #568: same A8 escape hatch as TrainingBenchmark — the
+        checkpoint_folder is an s3:// URI under `checkpointing run object`,
+        so the local statvfs would walk to root and abort with
+        ``[E401] CAP-01: no valid parent for s3://…``.
+        """
+        from mlpstorage_py.benchmarks.dlio import CheckpointingBenchmark
+
+        bm = MagicMock(spec=CheckpointingBenchmark)
+        bm.args = SimpleNamespace(
+            checkpoint_folder="s3://mybucket/checkpoints",
+            model="llama3-8b",
+            data_access_protocol="object",
+        )
+        assert CheckpointingBenchmark._capacity_gate_destination(bm) is None
+
+    def test_destination_joined_when_protocol_attribute_missing(self):
+        """Defensive: absence of data_access_protocol must NOT be read as
+        object mode — fall through to the existing join behavior so file/
+        POSIX runs and older callers keep working.
+        """
+        from mlpstorage_py.benchmarks.dlio import CheckpointingBenchmark
+
+        bm = MagicMock(spec=CheckpointingBenchmark)
+        bm.args = SimpleNamespace(checkpoint_folder="/cp", model="llama3-8b")
+        result = CheckpointingBenchmark._capacity_gate_destination(bm)
+        assert result == os.path.join("/cp", "llama3-8b")
 
 
 class TestVectorDBBenchmarkRequiredBytes:

@@ -3,6 +3,7 @@ import os
 import os.path
 import pprint
 import sys
+from typing import Optional
 from urllib.parse import urlparse
 
 from mlpstorage_py.benchmarks.base import Benchmark
@@ -811,10 +812,18 @@ class TrainingBenchmark(DLIOBenchmark):
         )
         return int(total_disk_bytes)
 
-    def _capacity_gate_destination(self) -> str:
+    def _capacity_gate_destination(self) -> Optional[str]:
         """Return ``args.data_dir`` — the training dataset destination per
         REQUIREMENTS.md CAP-01.
+
+        Object-mode runs (data_access_protocol == 'object') target an
+        ``s3://`` URI; statvfs against a URI walks to filesystem root and
+        aborts with ``[E401] CAP-01: no valid parent``. Return None to
+        fire the A8 remote-backend escape hatch in ``_pre_execution_gate``.
+        See issue #568.
         """
+        if getattr(self.args, 'data_access_protocol', None) == 'object':
+            return None
         return self.args.data_dir
 
     def datasize(self):
@@ -965,6 +974,11 @@ class CheckpointingBenchmark(DLIOBenchmark):
         """
         cf = getattr(self.args, "checkpoint_folder", None)
         if not cf:
+            return None
+        # Object-mode runs target an s3:// URI; statvfs against a URI
+        # walks to filesystem root and aborts with [E401] CAP-01: no
+        # valid parent. A8 escape hatch — see issue #568.
+        if getattr(self.args, 'data_access_protocol', None) == 'object':
             return None
         return os.path.join(cf, self.args.model)
 
