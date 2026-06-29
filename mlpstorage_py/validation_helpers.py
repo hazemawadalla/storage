@@ -165,6 +165,14 @@ def _validate_required_params(args) -> List[Exception]:
 
 def _is_object_storage(args) -> bool:
     """Return True if args indicate object/S3 storage (skip all filesystem checks)."""
+    # Canonical signal: the `object` positional sets data_access_protocol='object'.
+    # storage.storage_type=s3 is injected onto self.params_dict by
+    # DLIOBenchmark._apply_object_storage_params AFTER argument parsing, so it
+    # is not present in args.params at validation time for a bare `--object`
+    # invocation; data_access_protocol IS set at parse time and is what every
+    # other site (CAP-01 gate, dlio.py, run_summary, cli_parser) keys on. See #584.
+    if getattr(args, 'data_access_protocol', None) == 'object':
+        return True
     # Check params list for storage.storage_type=s3
     params = getattr(args, 'params', None) or []
     for p in params:
