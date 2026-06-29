@@ -606,5 +606,64 @@ class TestVectorDBBenchmark:
                 # _validate_vdb_dependencies should NOT have been called
                 mock_dep.assert_not_called()
 
+# =============================================================================
+# Tests for the "unsupported (model, accelerator) combination" error path
+# (DLIO workload YAML lookup)
+# =============================================================================
+
+class TestUnsupportedWorkloadCombination:
+    """When the resolved configs/dlio/workload/<model>_<accel>.yaml does not
+    exist, process_dlio_params must raise ConfigurationError(CONFIG_FILE_NOT_FOUND)
+    with a specific "combination not supported" message rather than a generic
+    FileNotFoundError."""
+
+    def _make_stub_training_benchmark(self, model, accelerator_type, mock_logger):
+        from mlpstorage_py.benchmarks.dlio import TrainingBenchmark
+        args = SimpleNamespace(
+            model=model,
+            accelerator_type=accelerator_type,
+            command='datasize',
+            params=None,
+        )
+        with patch.object(TrainingBenchmark, '__init__', lambda *a, **kw: None):
+            bench = TrainingBenchmark.__new__(TrainingBenchmark)
+            bench.args = args
+            bench.logger = mock_logger
+            return bench
+
+    def test_training_missing_yaml_raises_specific_error(self, mock_logger):
+        from mlpstorage_py.errors import ConfigurationError, ErrorCode
+        bench = self._make_stub_training_benchmark('unet3d', 'mi355', mock_logger)
+        with pytest.raises(ConfigurationError) as exc_info:
+            bench.process_dlio_params('unet3d_mi355.yaml')
+        err = exc_info.value
+        assert err.code == ErrorCode.CONFIG_FILE_NOT_FOUND
+        assert 'unet3d' in str(err)
+        assert 'mi355' in str(err)
+        assert 'not supported' in str(err)
+        # v3.0 advisory must list the three submittable combinations.
+        rendered = str(err) + "\n" + err.suggestion
+        assert 'retinanet' in rendered
+        assert 'b200' in rendered
+
+    def test_training_existing_yaml_does_not_raise_unsupported(self, mock_logger):
+        """unet3d_b200.yaml DOES exist — process_dlio_params must get past the
+        existence check (it may raise later for unrelated reasons since we
+        don't fully wire the benchmark, but NOT with our specific error)."""
+        from mlpstorage_py.errors import ConfigurationError, ErrorCode
+        bench = self._make_stub_training_benchmark('unet3d', 'b200', mock_logger)
+        try:
+            bench.process_dlio_params('unet3d_b200.yaml')
+        except ConfigurationError as e:
+            assert e.code != ErrorCode.CONFIG_FILE_NOT_FOUND, (
+                f"unet3d_b200.yaml exists; the unsupported-combination guard "
+                f"must not fire. Got: {e}"
+            )
+        except Exception:
+            # Unrelated failures (e.g., logger/attribute access downstream)
+            # are fine — the guard already passed.
+            pass
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
