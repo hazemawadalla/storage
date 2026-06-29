@@ -1505,13 +1505,14 @@ class IntegratedBenchmark:
         print(f"  A 200MiB block at 1GiB/s NVMe read = ~200 ms device latency.")
         print(f"  Compare latencies against block sizes, not against 4KiB page I/O.\n")
 
+        cache_stats = summary['cache_stats']
+
         """
         # Printing of pass/fail is not used in MLPerf 3.0
 
         PASS_SYMBOL = "[OK]"
         FAIL_SYMBOL = "[X]"
 
-        cache_stats = summary['cache_stats']
         if 'storage_health' in cache_stats:
             storage_health = cache_stats['storage_health']
             status = storage_health['overall_status']
