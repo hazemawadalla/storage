@@ -139,6 +139,9 @@ class IntegratedBenchmark:
         else:
             self.use_dataset = False
 
+        # Retained for the bpftrace device filter (resolves the backing dev_t).
+        self.cache_dir = cache_dir
+
         # Initialize components
         self.cache = MultiTierCache(
             model_config=model_config,
@@ -709,6 +712,49 @@ class IntegratedBenchmark:
                       f"Throughput: {throughput:.2f} tok/s")
                 last_log_time = now
 
+    def _resolve_trace_dev(self):
+        """Resolve cache_dir to a block-layer device filter ($2 for bpftrace).
+
+        Returns (devnum_str, note). The block-layer tracer can only ISOLATE a
+        plain whole-disk block device. For backings it cannot represent
+        (NFS/object/tmpfs/overlay) or cannot isolate with a single dev_t
+        (md/dm/LVM/dm-crypt), this returns "0" (trace ALL devices, legacy
+        behaviour) plus an explanatory note — never worse than before the filter.
+        Partitions resolve to their parent disk's dev_t.
+        """
+        if not self.cache_dir or not os.path.exists(self.cache_dir):
+            return "0", "no cache_dir; tracing all block devices"
+        try:
+            st = os.stat(self.cache_dir)
+        except OSError as e:
+            return "0", f"stat({self.cache_dir}) failed: {e}; tracing all devices"
+        maj, mn = os.major(st.st_dev), os.minor(st.st_dev)
+        # Synthetic st_dev (major 0): nfs, fuse (s3fs/goofys), tmpfs, overlay —
+        # this I/O never traverses block_rq_*, so block-layer distillation is moot.
+        if maj == 0:
+            return "0", ("network/object/virtual backing (nfs/fuse-s3/tmpfs/overlay): block-layer "
+                         "trace cannot see this I/O; bssplit/latency/iodepth will be empty "
+                         "(rwmix stays valid from app counts). Tracing all devices.")
+        sysblk = f"/sys/dev/block/{maj}:{mn}"
+        try:
+            realname = os.path.basename(os.path.realpath(sysblk))  # nvme1n1 / nvme1n1p1 / md0 / dm-0
+            # Partition -> parent disk (block_rq events carry the whole-disk dev_t).
+            if os.path.exists(f"{sysblk}/partition"):
+                parent = os.path.basename(os.path.dirname(os.path.realpath(sysblk)))
+                pmaj, pmn = (int(x) for x in open(f"/sys/block/{parent}/dev").read().strip().split(":"))
+                return str((pmaj << 20) | pmn), f"partition {realname} -> parent disk {parent}"
+            # Stacked (md/dm/LVM/crypt): block events are tagged with the leaf
+            # members, not this virtual device, so a single-dev filter can't isolate it.
+            slaves = f"/sys/block/{realname}/slaves"
+            if os.path.isdir(slaves) and os.listdir(slaves):
+                members = ", ".join(sorted(os.listdir(slaves)))
+                return "0", (f"stacked device {realname} (members: {members}): block events use member "
+                             f"dev_ts, not {realname}; single-dev filter cannot isolate it. Tracing all devices.")
+            # Plain whole disk.
+            return str((maj << 20) | mn), f"block device {realname}"
+        except Exception as e:
+            return "0", f"could not classify backing device ({e}); tracing all devices"
+
     def _start_latency_tracing(self):
         """Spawn bpftrace as a sudo subprocess to trace block-layer device latency."""
         script_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'utils')
@@ -722,14 +768,22 @@ class IntegratedBenchmark:
         # Determine the process name to filter on
         comm = os.path.basename(sys.argv[0]) if sys.argv[0] else 'python3'
 
+        # Device filter (Finding 1) with safe fallback for non-whole-disk-block
+        # backings (NFS/S3/tmpfs/overlay, md/dm/LVM, partitions). Anything the
+        # filter cannot isolate falls back to "0" (trace all) with a warning —
+        # never worse than legacy. See _resolve_trace_dev.
+        devnum, dev_note = self._resolve_trace_dev()
+        if devnum == "0" and self.cache_dir:
+            logger.warning(f"block-trace device filter disabled: {dev_note}")
+
         print(f"\n### LATENCY TRACING ###")
         print(f"  Script: {script_path}")
-        print(f"  Filter: {comm}")
+        print(f"  Filter: comm={comm}  dev={devnum} ({dev_note})")
         print(f"  Spawning sudo bpftrace (you may be prompted for password)...")
 
         try:
             self._trace_proc = subprocess.Popen(
-                ['sudo', script_path, comm],
+                ['sudo', script_path, comm, devnum],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 preexec_fn=os.setsid  # own process group for clean SIGINT
@@ -956,21 +1010,41 @@ class IntegratedBenchmark:
             for raw_line in trace_data[key]['raw']:
                 print(f"    {raw_line}")
 
+    def _nfs_chunk_kb(self):
+        """If cache_dir is on an NFS mount, return (rsize_kb, wsize_kb) — the
+        on-wire transfer chunk, which is the real storage block size for NFS
+        (the app's large syscalls are split into rsize/wsize chunks). Else
+        (None, None). Used as the bssplit source when there is no client block I/O."""
+        try:
+            import re
+            best = None
+            cdir = os.path.realpath(self.cache_dir) if self.cache_dir else ""
+            for line in open('/proc/mounts'):
+                p = line.split()
+                if len(p) >= 4 and 'nfs' in p[2]:
+                    mnt = p[1]
+                    if cdir == mnt or cdir.startswith(mnt.rstrip('/') + '/'):
+                        if best is None or len(mnt) > len(best[0]):
+                            best = (mnt, p[3])
+            if best:
+                r = re.search(r'\brsize=(\d+)', best[1])
+                w = re.search(r'\bwsize=(\d+)', best[1])
+                return (int(r.group(1)) // 1024 if r else None,
+                        int(w.group(1)) // 1024 if w else None)
+        except Exception as e:
+            logger.debug(f"_nfs_chunk_kb: {e}")
+        return (None, None)
+
     def _generate_fio_workload(self, trace_data: Dict) -> Optional[str]:
         """Generate a fio workload .ini file from bpftrace trace data.
 
-        Distills the traced block-layer I/O pattern into a standalone fio config
-        that reproduces the same bssplit, read/write ratio, queue depth, and
-        idle time characteristics observed during the benchmark run.
+        Distills the traced I/O pattern into a standalone fio config reproducing
+        the same bssplit, read/write ratio, queue depth and idle time. bssplit is
+        taken from the BLOCK layer for POSIX (real post-split device sizes) and
+        falls back to the NFS transport chunk / VFS request sizes for backings
+        with no usable client block I/O (NFS/S3).
         """
-        # ── Validate minimum required histograms ──
-        required = ['bssplit_read_kb', 'bssplit_write_kb']
-        for key in required:
-            if key not in trace_data or not trace_data[key].get('buckets'):
-                logger.warning(f"Missing {key} histogram; cannot generate fio workload")
-                return None
-
-        # ── bssplit: convert histogram buckets to fio format ──
+        # ── bssplit: convert a bpftrace size histogram to fio bssplit format ──
         def hist_to_bssplit(buckets: List[Dict]) -> str:
             total = sum(b['count'] for b in buckets)
             if total == 0:
@@ -983,7 +1057,6 @@ class IntegratedBenchmark:
                 pct = int(round(b['count'] * 100.0 / total))
                 if pct == 0 and b['count'] > 0:
                     pct = 1  # don't drop non-zero buckets
-                # Format size: use k for < 1024, m for >= 1024
                 if size_kb >= 1024:
                     size_str = f"{size_kb // 1024}m"
                 else:
@@ -991,23 +1064,130 @@ class IntegratedBenchmark:
                 parts.append(f"{size_str}/{pct}")
             return ":".join(parts) if parts else "4k/100"
 
-        read_bssplit = hist_to_bssplit(trace_data['bssplit_read_kb']['buckets'])
-        write_bssplit = hist_to_bssplit(trace_data['bssplit_write_kb']['buckets'])
+        def _bk(key):
+            v = trace_data.get(key)
+            return v.get('buckets', []) if isinstance(v, dict) else []
+
+        # App-level ops (ground truth) + block-trace counts — used for both the
+        # bssplit-source decision and rwmix.
+        cstats = self.results.get('summary', {}).get('cache_stats', {}) if hasattr(self, 'results') else {}
+        app_reads = cstats.get('read_iops', 0) or 0
+        app_writes = cstats.get('write_iops', 0) or 0
+        read_count = sum(b['count'] for b in _bk('bssplit_read_kb'))
+        write_count = sum(b['count'] for b in _bk('bssplit_write_kb'))
+        total_io = read_count + write_count
+
+        # ── bssplit SOURCE selection ──
+        # Use the BLOCK layer (real post-split device I/O, e.g. MDTS-shaped
+        # 128K-1M) ONLY when both directions are present AND the block read/write
+        # direction is consistent with the app. Otherwise the captured block I/O
+        # is not the application's (loopback NFS server writeback, or contamination
+        # from other processes) -> fall back to the NFS transport chunk (rsize/
+        # wsize) or the VFS request sizes (the storage-agnostic app layer).
+        block_ok = bool(_bk('bssplit_read_kb') and _bk('bssplit_write_kb'))
+        if block_ok and (app_reads + app_writes) > 0 and total_io > 0:
+            if abs(read_count * 100.0 / total_io - app_reads * 100.0 / (app_reads + app_writes)) > 40:
+                block_ok = False  # block direction grossly inconsistent with the app
+        if block_ok:
+            read_bssplit = hist_to_bssplit(_bk('bssplit_read_kb'))
+            write_bssplit = hist_to_bssplit(_bk('bssplit_write_kb'))
+            bssplit_src = "block layer (post-split device I/O)"
+        else:
+            rkb, wkb = self._nfs_chunk_kb()
+            vfs_r, vfs_w = _bk('vfs_read_sz_kb'), _bk('vfs_write_sz_kb')
+            if rkb or wkb:
+                rkb, wkb = (rkb or wkb), (wkb or rkb)
+                read_bssplit, write_bssplit = f"{rkb}k/100", f"{wkb}k/100"
+                bssplit_src = f"NFS transport chunk (rsize={rkb}KiB, wsize={wkb}KiB)"
+            elif vfs_r or vfs_w:
+                read_bssplit = hist_to_bssplit(vfs_r or vfs_w)
+                write_bssplit = hist_to_bssplit(vfs_w or vfs_r)
+                bssplit_src = "VFS request sizes (app layer)"
+            else:
+                logger.warning("no block / NFS / VFS size data captured; cannot generate fio workload")
+                return None
         bssplit_line = f"{read_bssplit},{write_bssplit}"
 
-        # ── rwmixread: from I/O count ratio ──
-        read_count = sum(b['count'] for b in trace_data['bssplit_read_kb']['buckets'])
-        write_count = sum(b['count'] for b in trace_data['bssplit_write_kb']['buckets'])
-        total_io = read_count + write_count
-        rwmixread = int(round(read_count * 100.0 / total_io)) if total_io > 0 else 50
+        # ── rwmixread: from APP-level read/write ops (ground truth), NOT block
+        #    request counts (Finding 2). Block counts are skewed by MDTS splitting
+        #    and bpftrace event loss; the app's own storage-op counts are exact.
+        #    Fall back to block counts only if app stats are unavailable. ──
+        if app_reads + app_writes > 0:
+            rwmixread = int(round(app_reads * 100.0 / (app_reads + app_writes)))
+            rwmix_src = "app-level read/write ops"
+        elif total_io > 0:
+            rwmixread = int(round(read_count * 100.0 / total_io))
+            rwmix_src = "block-trace counts (app stats unavailable)"
+        else:
+            rwmixread = 50
+            rwmix_src = "default (no data)"
 
-        # ── iodepth: from QD histogram P50 ──
-        iodepth = 32  # default
-        for qd_key in ('qd_read', 'qd_write'):
-            if qd_key in trace_data and trace_data[qd_key].get('buckets'):
-                p50 = self._hist_percentile(trace_data[qd_key]['buckets'], 50)
-                candidate = max(1, p50['range_us'][0])
-                iodepth = max(iodepth, candidate)
+        # ── capture-health diagnostics (Finding 3): block tracing silently drops
+        #    events under high IOPS. Compare block issues vs completes, and block
+        #    read% vs app read%, and surface any large gap. ──
+        d2c_reads = sum(b['count'] for b in trace_data.get('d2c_read_us', {}).get('buckets', []))
+        d2c_writes = sum(b['count'] for b in trace_data.get('d2c_write_us', {}).get('buckets', []))
+        issues, completes = total_io, d2c_reads + d2c_writes
+        capture_warnings = []
+        if app_reads + app_writes > 0 and total_io == 0:
+            # No block I/O captured though the app did I/O: network/object/virtual/
+            # stacked backing (NFS/S3/tmpfs/md/dm), or bpftrace did not attach.
+            capture_warnings.append(
+                f"no block I/O captured (block issues=0) while app did {app_reads + app_writes:,} ops "
+                f"-> network/object/virtual/stacked backing or trace not attached; bssplit/latency/iodepth "
+                f"are NOT representative (rwmix from app counts is still correct)")
+        if app_reads + app_writes > 0 and total_io > 0:
+            blk_rd_pct = read_count * 100.0 / total_io
+            app_rd_pct = app_reads * 100.0 / (app_reads + app_writes)
+            if abs(blk_rd_pct - app_rd_pct) > 15:
+                capture_warnings.append(
+                    f"block read% ({blk_rd_pct:.0f}) vs app read% ({app_rd_pct:.0f}) differ >15pts "
+                    f"-> trace event loss/contamination (using app-level rwmix)")
+        if completes > 0:
+            imbal = abs(issues - completes) * 100.0 / max(issues, completes)
+            if imbal > 25:
+                capture_warnings.append(
+                    f"block issue/complete imbalance {imbal:.0f}% (issues={issues:,} completes={completes:,}) "
+                    f"-> event loss or @d correlation-map saturation; trace counts unreliable")
+        for w in capture_warnings:
+            logger.warning(f"trace capture: {w}")
+        logger.info(f"fio distill: rwmixread={rwmixread} ({rwmix_src}); block issues={issues:,} "
+                    f"completes={completes:,}; app ops r={app_reads:,} w={app_writes:,}")
+
+        # ── iodepth: mean queue depth via Little's Law ──
+        # QD = device-busy-time / wall-clock = Σ(D2C latency) / duration.
+        # This replaces the old @qd_* in-flight counter, which was a racy
+        # non-atomic global RMW that drifted to millions under concurrent
+        # CPUs + dropped events, yielding un-runnable iodepth (ENOMEM).
+        # Result is always clamped to [1, MAX_IODEPTH].
+        MAX_IODEPTH = 256
+
+        def _avg_qd(buckets) -> float:
+            busy_us = 0.0
+            for b in buckets:
+                lo, hi = b['range_us'][0], b['range_us'][1]
+                mid = (lo * hi) ** 0.5 if lo > 0 else hi / 2.0
+                busy_us += b['count'] * mid
+            window_us = max(1.0, float(self.duration) * 1e6)
+            return busy_us / window_us
+
+        if bssplit_src.startswith("block layer"):
+            # POSIX: Little's Law from the (real device) D2C latency.
+            qd = 0.0
+            for d2c_key in ('d2c_read_us', 'd2c_write_us'):
+                if d2c_key in trace_data and trace_data[d2c_key].get('buckets'):
+                    qd = max(qd, _avg_qd(trace_data[d2c_key]['buckets']))
+            if qd <= 0:
+                for qd_key in ('qd_read', 'qd_write'):
+                    if qd_key in trace_data and trace_data[qd_key].get('buckets'):
+                        p50 = self._hist_percentile(trace_data[qd_key]['buckets'], 50)
+                        qd = max(qd, p50['range_us'][0])
+            iodepth = int(min(MAX_IODEPTH, max(1, round(qd) if qd > 0 else 32)))
+        else:
+            # NFS/S3 fallback: D2C here is the loopback server's writeback (or
+            # absent), not the app's queue. Use the app's intended concurrency.
+            app_qd = self.max_concurrent_allocs if self.max_concurrent_allocs > 0 else self.num_users
+            iodepth = int(min(MAX_IODEPTH, max(1, app_qd or 32)))
 
         # ── thinktime: from write_to_fsync gap (CPU idle between I/O bursts) ──
         thinktime_us = 0
@@ -1039,7 +1219,11 @@ class IntegratedBenchmark:
             f"# KV bytes/token: {bpt:,} bytes ({bpt/1024:.0f}KiB)",
             f"#",
             f"# Distilled from bpftrace block-layer tracing during benchmark run.",
-            f"# Total traced I/Os: {total_io:,} ({read_count:,} reads, {write_count:,} writes)",
+            f"# Total traced block I/Os: {total_io:,} ({read_count:,} reads, {write_count:,} writes)",
+            f"# App-level storage ops: {app_reads:,} reads, {app_writes:,} writes",
+            f"# rwmixread={rwmixread} (source: {rwmix_src})",
+            f"# bssplit (source: {bssplit_src})",
+        ] + [f"# WARNING: {w}" for w in capture_warnings] + [
             f"#",
             f"# Usage:",
             f"#   fio <this_file> --filename=/dev/nvmeXn1",
@@ -1056,7 +1240,9 @@ class IntegratedBenchmark:
             f"iodepth={iodepth}",
             f"iodepth_batch_submit={iodepth}",
             f"iodepth_batch_complete_min=1",
-            f"size=100%",
+            # No size= here: a job-file size overrides the fio CLI --size and breaks
+            # file targets ("you need to specify size="). fio uses the whole device
+            # for a raw --filename, or honors --size for a regular file.
         ]
 
         if thinktime_us > 0:

@@ -18,15 +18,32 @@
  *   @d2c_write_us  — Dispatch-to-Complete (actual device hardware time) for writes
  *   @vfs_read_us   — Full VFS read latency (application-visible)
  *   @vfs_write_us  — Full VFS write latency (application-visible)
+ *   @vfs_read_sz_kb  — VFS read request size (KiB): app I/O size pre-split/pre-cache
+ *   @vfs_write_sz_kb — VFS write request size (KiB): the storage-agnostic block-size
+ *                      source for backings with no client block I/O (NFS/S3)
  *
  * Plus block size, queue depth, and LBA distribution:
  *
  *   @bssplit_read_kb  — Block size distribution for reads (KB)
  *   @bssplit_write_kb — Block size distribution for writes (KB)
- *   @qd_read          — Instantaneous queue depth at dispatch (reads)
- *   @qd_write         — Instantaneous queue depth at dispatch (writes)
  *   @lba_read_gb      — LBA heatmap for reads (10 GB linear buckets)
  *   @lba_write_gb     — LBA heatmap for writes (10 GB linear buckets)
+ *
+ * QUEUE DEPTH — note on method:
+ *   This script intentionally does NOT emit a queue-depth histogram. An earlier
+ *   version maintained an @inflight counter (++ on issue, -- on complete) and
+ *   histogrammed it. That counter was a NON-ATOMIC global read-modify-write
+ *   updated concurrently from every CPU, with a decrement gated on a
+ *   correlation-map hit — so under high IOPS and dropped completion events it
+ *   drifted upward without bound (observed P50 of 8.4 MILLION), producing
+ *   absurd, un-runnable fio iodepth (ENOMEM).
+ *
+ *   Mean queue depth is instead derived DOWNSTREAM by the distiller via
+ *   Little's Law:  QD = Σ(D2C latency) / wall-clock window  (mean concurrency =
+ *   device-busy-time / elapsed-time). The distiller reads the @d2c_*_us
+ *   histograms below and the known run duration. This needs no in-flight
+ *   counter and no BEGIN/END probes (which are unsupported on some bpftrace
+ *   builds — "Could not resolve symbol: BEGIN_trigger").
  *
  * Plus the write-path serialization gap:
  *
@@ -61,11 +78,13 @@
  *   # Trace all processes (caution: noisy):
  *   sudo BPFTRACE_COMM="" bpftrace storage_latency_stack.bt
  *
- * Optional device filter (block layer only):
+ * Device filter (2nd positional arg = target kernel dev_t; 0 or omitted = all):
  *
- *   # Get device number: lsblk -no MAJ:MIN /dev/nvme5n1 → 259:5
- *   # Convert: python3 -c "print(hex(259 << 20 | 5))"  → 0x10300005
- *   sudo BPFTRACE_COMM="kv-cache" BPFTRACE_DEV=0x10300005 bpftrace storage_latency_stack.bt
+ *   # dev_t = (major << 20) | minor.  For /dev/nvme1n1 (259:1):
+ *   #   python3 -c "import os;s=os.stat('/mnt/dc3000me');print((os.major(s.st_dev)<<20)|os.minor(s.st_dev))"
+ *   sudo bpftrace storage_latency_stack.bt "kv-cache" 271581185
+ *   # Restricts ALL block-layer metrics (bssplit/rwmix/lba/q2d/d2c) to that one
+ *   # device, so a second mounted drive or the OS disk cannot pollute the trace.
  *
  * Requirements:
  *   - Linux 5.x+ with BTF support
@@ -99,7 +118,13 @@
  *
  * ==================================================================== */
 
+/* Device filter: $2 is the target kernel dev_t ((major<<20)|minor); 0 = all
+ * devices. Gating insert + the two unguarded issue probes here restricts every
+ * downstream metric (bssplit/rwmix/lba via @d, q2d via @q, d2c via @d) to the
+ * target drive only — so a second mounted drive or the OS disk can't pollute
+ * the distilled workload. */
 tracepoint:block:block_rq_insert
+/($2 == 0) || (args->dev == $2)/
 {
     @q[args->dev, args->sector] = nsecs;
 }
@@ -135,27 +160,29 @@ tracepoint:block:block_rq_issue
     delete(@q[args->dev, args->sector]);
 }
 
-/* D2C start + bssplit + QD: fires on ALL dispatched I/Os */
+/* D2C start + bssplit: fires on ALL dispatched I/Os.
+ * Queue depth is NOT tracked with an in-flight counter here (that approach
+ * was racy — see header). It is derived downstream via Little's Law from the
+ * per-direction D2C latency. Device-filtered ($2). */
 tracepoint:block:block_rq_issue
+/($2 == 0) || (args->dev == $2)/
 {
     @d[args->dev, args->sector] = nsecs;
 
     if (((uint8 *)args->rwbs)[0] == 82) {
         @bssplit_read_kb = hist(args->bytes / 1024);
-        @inflight_read++;
-        @qd_read = hist(@inflight_read);
     } else if (((uint8 *)args->rwbs)[0] == 87) {
         @bssplit_write_kb = hist(args->bytes / 1024);
-        @inflight_write++;
-        @qd_write = hist(@inflight_write);
     }
 }
 
 /* LBA heatmap: where on the device is I/O landing?
  * Sector >> 21 converts 512-byte sectors to GB offset.
  * lhist gives linear 10 GB buckets up to 8 TB — shows spatial I/O pattern.
- * Clustered = narrow band; random = spread; sequential = progression. */
+ * Clustered = narrow band; random = spread; sequential = progression.
+ * Device-filtered ($2). */
 tracepoint:block:block_rq_issue
+/($2 == 0) || (args->dev == $2)/
 {
     $gb = args->sector >> 21;
     if (((uint8 *)args->rwbs)[0] == 82) {
@@ -173,10 +200,8 @@ tracepoint:block:block_rq_complete
 
         if (((uint8 *)args->rwbs)[0] == 82) {
             @d2c_read_us = hist($lat);
-            @inflight_read--;
         } else if (((uint8 *)args->rwbs)[0] == 87) {
             @d2c_write_us = hist($lat);
-            @inflight_write--;
         }
 
         delete(@d[args->dev, args->sector]);
@@ -205,6 +230,7 @@ kprobe:vfs_read
 /comm == str($1) || str($1) == ""/
 {
     @rs[tid] = nsecs;
+    @vfs_read_sz_kb = hist(arg2 / 1024);   /* app request size (count arg, bytes->KiB): pre-split, pre-cache */
 }
 
 kretprobe:vfs_read
@@ -218,6 +244,7 @@ kprobe:vfs_write
 /comm == str($1) || str($1) == ""/
 {
     @ws[tid] = nsecs;
+    @vfs_write_sz_kb = hist(arg2 / 1024);  /* app request size (count arg, bytes->KiB): pre-split, pre-cache */
 }
 
 kretprobe:vfs_write
@@ -308,10 +335,12 @@ tracepoint:syscalls:sys_enter_read
 
 
 /* ====================================================================
- * CLEANUP: Remove incomplete entries on exit
+ * CLEANUP: no BEGIN/END probes
+ *
+ * BEGIN/END are deliberately avoided: some bpftrace builds cannot resolve the
+ * trigger symbols ("Could not resolve symbol: BEGIN_trigger"), which aborts the
+ * whole script. bpftrace auto-prints all maps on SIGINT, so no END is needed.
+ * The @q, @d, @rs etc. correlation maps appear as empty hashes in the output;
+ * the distiller ignores them (no histogram buckets). Queue depth is derived
+ * downstream from @d2c_*_us via Little's Law — see the header note.
  * ==================================================================== */
-
-/* END block removed for bpftrace 0.14 compatibility.
- * bpftrace automatically prints all maps on SIGINT.
- * The @q, @d, @rs etc. maps will appear as empty hashes in output;
- * the parser ignores them (no histogram buckets). */

@@ -33,14 +33,18 @@
 set -euo pipefail
 
 COMM=""
+DEV="0"          # target kernel dev_t for the block-layer filter; 0 = all devices
 GEN_FIO=0
 
-# Parse arguments
+# Parse arguments:  <comm> [<dev>] [--fio]   (positional: comm, then dev)
+_pos=0
 for arg in "$@"; do
     if [ "$arg" = "--fio" ]; then
         GEN_FIO=1
-    elif [ -z "$COMM" ]; then
-        COMM="$arg"
+    elif [ "$_pos" -eq 0 ]; then
+        COMM="$arg"; _pos=1
+    elif [ "$_pos" -eq 1 ]; then
+        DEV="$arg"; _pos=2
     fi
 done
 
@@ -84,7 +88,7 @@ if [ "$GEN_FIO" -eq 1 ]; then
 
     # Run bpftrace; redirect all output to file
     # bpftrace prints histograms on SIGINT before exiting
-    bpftrace "$BT_SCRIPT" "$COMM" > "$TRACE_OUTPUT" 2>&1 || true
+    bpftrace "$BT_SCRIPT" "$COMM" "$DEV" > "$TRACE_OUTPUT" 2>&1 || true
 
     # Display the histograms
     cat "$TRACE_OUTPUT"
@@ -103,5 +107,5 @@ if [ "$GEN_FIO" -eq 1 ]; then
 
     rm -f "$TRACE_OUTPUT"
 else
-    exec bpftrace "$BT_SCRIPT" "$COMM"
+    exec bpftrace "$BT_SCRIPT" "$COMM" "$DEV"
 fi

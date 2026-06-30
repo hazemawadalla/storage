@@ -108,7 +108,24 @@ def hist_to_bssplit(buckets: List[Dict]) -> str:
     return ":".join(parts) if parts else "4k/100"
 
 
-def generate_fio(histograms: Dict, process_name: str = "") -> str:
+def avg_qd_from_d2c(buckets: List[Dict], window_s: float) -> float:
+    """Mean queue depth via Little's Law: Σ(D2C latency) / wall-clock window.
+
+    Replaces the old @qd_* in-flight counter (a racy non-atomic global that
+    drifted to millions and produced un-runnable iodepth). Uses only the
+    race-free per-event D2C latency histogram plus the known trace window.
+    """
+    busy_us = 0.0
+    for b in buckets:
+        lo, hi = b['low'], b['high']
+        mid = (lo * hi) ** 0.5 if lo > 0 else hi / 2.0
+        busy_us += b['count'] * mid
+    window_us = max(1.0, window_s * 1e6)
+    return busy_us / window_us
+
+
+def generate_fio(histograms: Dict, process_name: str = "",
+                 window_s: float = 300.0, max_iodepth: int = 256) -> str:
     """Generate a fio .ini config from parsed histograms."""
 
     # ── bssplit ──
@@ -123,13 +140,19 @@ def generate_fio(histograms: Dict, process_name: str = "") -> str:
     total_io = read_count + write_count
     rwmixread = int(round(read_count * 100.0 / total_io)) if total_io > 0 else 50
 
-    # ── iodepth from QD histogram P50 ──
-    iodepth = 32
-    for qd_key in ('qd_read', 'qd_write'):
-        buckets = histograms.get(qd_key, [])
+    # ── iodepth: mean queue depth via Little's Law (clamped) ──
+    qd = 0.0
+    for d2c_key in ('d2c_read_us', 'd2c_write_us'):
+        buckets = histograms.get(d2c_key, [])
         if buckets:
-            candidate = max(1, hist_percentile(buckets, 50))
-            iodepth = max(iodepth, candidate)
+            qd = max(qd, avg_qd_from_d2c(buckets, window_s))
+    if qd <= 0:
+        # Fallback: legacy @qd_* histogram (clamped), then default.
+        for qd_key in ('qd_read', 'qd_write'):
+            buckets = histograms.get(qd_key, [])
+            if buckets:
+                qd = max(qd, hist_percentile(buckets, 50))
+    iodepth = int(min(max_iodepth, max(1, round(qd) if qd > 0 else 32)))
 
     # ── thinktime from write_to_fsync gap ──
     thinktime_us = 0
@@ -197,7 +220,8 @@ def generate_fio(histograms: Dict, process_name: str = "") -> str:
         f"iodepth={iodepth}",
         f"iodepth_batch_submit={iodepth}",
         f"iodepth_batch_complete_min=1",
-        f"size=100%",
+        # No size= : a job-file size overrides the fio CLI --size and breaks file
+        # targets. fio uses the whole device for a raw --filename, or --size for a file.
     ])
 
     if thinktime_us > 0:
@@ -229,6 +253,10 @@ def main():
                         help='Output fio .ini file. Default: fio_traced_TIMESTAMP.ini')
     parser.add_argument('--process', default='',
                         help='Process name (for fio job naming and comments)')
+    parser.add_argument('--window-s', type=float, default=300.0,
+                        help='Trace wall-clock window in seconds (for Little\'s Law queue depth). Default: 300')
+    parser.add_argument('--max-iodepth', type=int, default=256,
+                        help='Clamp distilled iodepth to at most this value. Default: 256')
     parser.add_argument('--stdout', action='store_true',
                         help='Print fio config to stdout instead of file')
     args = parser.parse_args()
@@ -257,7 +285,8 @@ def main():
         sys.exit(1)
 
     # Generate
-    fio_config = generate_fio(histograms, args.process)
+    fio_config = generate_fio(histograms, args.process,
+                              window_s=args.window_s, max_iodepth=args.max_iodepth)
 
     if args.stdout:
         print(fio_config)
