@@ -666,18 +666,21 @@ class KVCacheBenchmark(Benchmark):
     ) -> dict:
         """Aggregate per-rank JSON results for one option across all trials.
 
-        Sums read/write bandwidth and token throughput across all rank files.
-        Takes the mean of read/write bandwidth and token throughput across
-        the trials. Takes max storage_io_latency_ms.p95 across all ranks and
-        trials. Takes the max Records missing files without crashing and
-        sets partial_failure. When storage_entries == 0, logs that the
-        working set was served from the CPU tier.
+        Within each trial, sums read/write bandwidth and token throughput
+        across ranks; across trials, takes the mean (fmean). For latency,
+        takes the max across ranks and trials of the storage-tier device P95
+        (storage_read_device_p95_ms / storage_write_device_p95_ms) — the
+        CLOSED scoring metric, isolated from the GPU/CPU tiers and host/queue
+        time. Records missing files without crashing and sets partial_failure.
+        When storage_entries == 0, logs that the working set was served from
+        the CPU tier.
         """
         all_read_bw = []
         all_write_bw = []
         all_avg_throughput = []
         all_storage_throughput = []
         all_p95_latency = []
+        all_write_p95 = []
         missing_files = []
         cpu_tier_flags = []
         for trial_dir in trial_dirs:
@@ -686,6 +689,7 @@ class KVCacheBenchmark(Benchmark):
             trial_avg_throughput = []
             trial_storage_throughput = []
             trial_p95_latency = []
+            trial_write_p95 = []
             for rank_idx in range(expected_rank_count):
                 rank_dir = Path(trial_dir) / f"rank_{rank_idx}"
                 result_file = next(rank_dir.glob('kvcache_results_*.json'), None)
@@ -708,7 +712,8 @@ class KVCacheBenchmark(Benchmark):
                     trial_write_bw.append(cache_stats.get('tier_storage_write_bandwidth_gbps', 0.0))
                     trial_avg_throughput.append(summary.get('avg_throughput_tokens_per_sec', 0.0))
                     trial_storage_throughput.append(summary.get('storage_throughput_tokens_per_sec', 0.0))
-                    trial_p95_latency.append(summary.get('storage_io_latency_ms', {}).get('p95', 0.0))
+                    trial_p95_latency.append(cache_stats.get('storage_read_device_p95_ms', 0.0))
+                    trial_write_p95.append(cache_stats.get('storage_write_device_p95_ms', 0.0))
                 except Exception as e:
                     self.logger.warning(f"Failed to parse {result_file}: {e}")
                     missing_files.append(str(result_file))
@@ -717,6 +722,7 @@ class KVCacheBenchmark(Benchmark):
             all_avg_throughput.append(sum(trial_avg_throughput))
             all_storage_throughput.append(sum(trial_storage_throughput))
             all_p95_latency.append(max(trial_p95_latency) if trial_p95_latency else 0.0)
+            all_write_p95.append(max(trial_write_p95) if trial_write_p95 else 0.0)
         if missing_files:
             hosts = getattr(self.args, 'hosts', None) or []
             multi_host = any(not _is_localhost(h.split(':')[0]) for h in hosts)
@@ -737,7 +743,8 @@ class KVCacheBenchmark(Benchmark):
             'aggregated_write_bandwidth_gbps': fmean(all_write_bw) if all_write_bw else 0.0,
             'aggregated_avg_throughput_tokens_per_sec': fmean(all_avg_throughput) if all_avg_throughput else 0.0,
             'aggregated_storage_throughput_tokens_per_sec': fmean(all_storage_throughput) if all_storage_throughput else 0.0,
-            'aggregated_p95_latency_ms': max(all_p95_latency) if all_p95_latency else None,
+            'aggregated_device_read_p95_ms': max(all_p95_latency) if all_p95_latency else None,
+            'aggregated_device_write_p95_ms': max(all_write_p95) if all_write_p95 else None,
             'rank_count': expected_rank_count,
             'trial_count': len(trial_dirs),
             'partial_failure': len(missing_files) > 0,

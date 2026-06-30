@@ -475,8 +475,9 @@ class TestAggregateOptionResults:
                     'tier_storage_read_bandwidth_gbps': bw,
                     'tier_storage_write_bandwidth_gbps': write_bw,
                     'storage_entries': storage_entries,
+                    'storage_read_device_p95_ms': p95,
+                    'storage_write_device_p95_ms': p95,
                 },
-                'storage_io_latency_ms': {'p95': p95},
                 'avg_throughput_tokens_per_sec': avg_throughput,
                 'storage_throughput_tokens_per_sec': storage_throughput,
             }
@@ -495,7 +496,7 @@ class TestAggregateOptionResults:
         assert result['aggregated_read_bandwidth_gbps'] == pytest.approx(4.0)
 
     def test_takes_max_p95_latency_across_ranks(self, tmp_path):
-        """aggregated_p95_latency_ms == max of all rank p95 values."""
+        """aggregated_device_read_p95_ms == max of all rank p95 values."""
         bm = _make_run_benchmark(tmp_path)
         trial_dir = tmp_path / 'trial_0'
         self._make_rank_file(trial_dir / 'rank_0', bw=1.5, p95=10.0)
@@ -503,7 +504,7 @@ class TestAggregateOptionResults:
 
         result = bm._aggregate_option_results(1, [str(trial_dir)], expected_rank_count=2)
 
-        assert result['aggregated_p95_latency_ms'] == pytest.approx(15.0)
+        assert result['aggregated_device_read_p95_ms'] == pytest.approx(15.0)
 
     def test_no_partial_failure_when_all_files_present(self, tmp_path):
         """partial_failure is False when all rank files exist."""
@@ -579,7 +580,7 @@ class TestAggregateOptionResults:
             'option',
             'aggregated_read_bandwidth_gbps', 'aggregated_write_bandwidth_gbps',
             'aggregated_avg_throughput_tokens_per_sec', 'aggregated_storage_throughput_tokens_per_sec',
-            'aggregated_p95_latency_ms',
+            'aggregated_device_read_p95_ms', 'aggregated_device_write_p95_ms',
             'rank_count', 'trial_count', 'partial_failure', 'missing_files', 'cpu_tier_ranks',
         }
         assert required_keys.issubset(set(result.keys()))
@@ -608,8 +609,8 @@ class TestAggregateOptionResults:
         # Write file with a different timestamp than run_datetime
         data = {
             'summary': {
-                'cache_stats': {'tier_storage_read_bandwidth_gbps': 3.0, 'storage_entries': 50},
-                'storage_io_latency_ms': {'p95': 7.0},
+                'cache_stats': {'tier_storage_read_bandwidth_gbps': 3.0, 'storage_entries': 50,
+                                'storage_read_device_p95_ms': 7.0, 'storage_write_device_p95_ms': 7.0},
             }
         }
         (rank_dir / 'kvcache_results_20260523_130055.json').write_text(json.dumps(data))
@@ -620,7 +621,7 @@ class TestAggregateOptionResults:
         assert result['partial_failure'] is False
 
     def test_none_p95_when_no_successful_reads(self, tmp_path):
-        """aggregated_p95_latency_ms is 0.0 when all rank files are missing."""
+        """aggregated_device_read_p95_ms is 0.0 when all rank files are missing."""
         bm = _make_run_benchmark(tmp_path)
         trial_dir = tmp_path / 'trial_0'
         # Both rank dirs exist but have no json files
@@ -630,7 +631,7 @@ class TestAggregateOptionResults:
         result = bm._aggregate_option_results(1, [str(trial_dir)], expected_rank_count=2)
 
         # Empty trial contributes 0.0; fmean([0.0]) = 0.0
-        assert result['aggregated_p95_latency_ms'] == pytest.approx(0.0)
+        assert result['aggregated_device_read_p95_ms'] == pytest.approx(0.0)
         assert result['partial_failure'] is True
 
 
@@ -644,7 +645,8 @@ class TestWriteRunSummary:
             'aggregated_write_bandwidth_gbps': 0.0,
             'aggregated_avg_throughput_tokens_per_sec': 0.0,
             'aggregated_storage_throughput_tokens_per_sec': 0.0,
-            'aggregated_p95_latency_ms': p95,
+            'aggregated_device_read_p95_ms': p95,
+            'aggregated_device_write_p95_ms': p95,
             'rank_count': 2,
             'trial_count': 1,
             'partial_failure': partial,
@@ -755,7 +757,7 @@ class TestWriteRunSummary:
             'aggregated_write_bandwidth_gbps': float(0.0),
             'aggregated_avg_throughput_tokens_per_sec': float(0.0),
             'aggregated_storage_throughput_tokens_per_sec': float(0.0),
-            'aggregated_p95_latency_ms': float(12.0),
+            'aggregated_device_read_p95_ms': float(12.0),
             'rank_count': 2,
             'trial_count': 1,
             'partial_failure': False,
@@ -806,7 +808,7 @@ class TestExecuteRun:
             'aggregated_write_bandwidth_gbps': 0.0,
             'aggregated_avg_throughput_tokens_per_sec': 0.0,
             'aggregated_storage_throughput_tokens_per_sec': 0.0,
-            'aggregated_p95_latency_ms': 0.0,
+            'aggregated_device_read_p95_ms': 0.0,
             'rank_count': 2,
             'trial_count': 1,
             'partial_failure': False,
@@ -1142,7 +1144,7 @@ class TestClosedEnforcement:
             'aggregated_write_bandwidth_gbps': 0.0,
             'aggregated_avg_throughput_tokens_per_sec': 0.0,
             'aggregated_storage_throughput_tokens_per_sec': 0.0,
-            'aggregated_p95_latency_ms': 0.0,
+            'aggregated_device_read_p95_ms': 0.0,
             'rank_count': 1, 'trial_count': 3,
             'partial_failure': False, 'missing_files': [], 'cpu_tier_ranks': [],
         }
@@ -1163,7 +1165,7 @@ class TestClosedEnforcement:
             'aggregated_write_bandwidth_gbps': 0.0,
             'aggregated_avg_throughput_tokens_per_sec': 0.0,
             'aggregated_storage_throughput_tokens_per_sec': 0.0,
-            'aggregated_p95_latency_ms': 0.0,
+            'aggregated_device_read_p95_ms': 0.0,
             'rank_count': 1, 'trial_count': 3,
             'partial_failure': False, 'missing_files': [], 'cpu_tier_ranks': [],
         }
@@ -1207,7 +1209,7 @@ class TestClosedEnforcement:
                  'aggregated_write_bandwidth_gbps': 0.0,
                  'aggregated_avg_throughput_tokens_per_sec': 0.0,
                  'aggregated_storage_throughput_tokens_per_sec': 0.0,
-                 'aggregated_p95_latency_ms': 0.0,
+                 'aggregated_device_read_p95_ms': 0.0,
                  'rank_count': 1, 'trial_count': 1,
                  'partial_failure': False, 'missing_files': [], 'cpu_tier_ranks': [],
              }), \
@@ -1329,7 +1331,7 @@ class TestWrapperCommandForwardsPerOptionArgs:
             'aggregated_write_bandwidth_gbps': 0.0,
             'aggregated_avg_throughput_tokens_per_sec': 0.0,
             'aggregated_storage_throughput_tokens_per_sec': 0.0,
-            'aggregated_p95_latency_ms': 0.0,
+            'aggregated_device_read_p95_ms': 0.0,
             'rank_count': 1, 'trial_count': 1,
             'partial_failure': False, 'missing_files': [], 'cpu_tier_ranks': [],
         }
@@ -1517,7 +1519,7 @@ class TestExecuteRunHonorsNumProcesses:
             'aggregated_write_bandwidth_gbps': 0.0,
             'aggregated_avg_throughput_tokens_per_sec': 0.0,
             'aggregated_storage_throughput_tokens_per_sec': 0.0,
-            'aggregated_p95_latency_ms': 0.0,
+            'aggregated_device_read_p95_ms': 0.0,
             'rank_count': 1, 'trial_count': 1,
             'partial_failure': False, 'missing_files': [], 'cpu_tier_ranks': [],
         }
@@ -1659,7 +1661,7 @@ class TestProbeResultsDirShared:
             'aggregated_write_bandwidth_gbps': 0.0,
             'aggregated_avg_throughput_tokens_per_sec': 0.0,
             'aggregated_storage_throughput_tokens_per_sec': 0.0,
-            'aggregated_p95_latency_ms': 0.0,
+            'aggregated_device_read_p95_ms': 0.0,
             'rank_count': 2, 'trial_count': 1,
             'partial_failure': False, 'missing_files': [], 'cpu_tier_ranks': [],
         }

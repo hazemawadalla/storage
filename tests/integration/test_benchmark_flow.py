@@ -671,8 +671,9 @@ class TestKVCacheRunIntegration:
                             'tier_storage_read_bandwidth_gbps': 1.5,
                             'tier_storage_write_bandwidth_gbps': 0.5,
                             'storage_entries': 100,
+                            'storage_read_device_p95_ms': 12.0,
+                            'storage_write_device_p95_ms': 12.0,
                         },
-                        'storage_io_latency_ms': {'p95': 12.0},
                         'avg_throughput_tokens_per_sec': 100.0,
                         'storage_throughput_tokens_per_sec': 50.0,
                     }
