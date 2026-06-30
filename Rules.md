@@ -755,7 +755,7 @@ mlpstorage closed kvcache run --systemname <name> --hosts node1 node2 --num-proc
 
 NFS backing — `--cache-dir` points at the NFS client mount (present on every
 client host); the storage-tier metrics are measured at the application's POSIX
-boundary over NFS (see 6.5):
+boundary over NFS (see 6.4):
 
 ```
 mlpstorage closed kvcache run --systemname <name> --hosts node1 node2 node3 node4 \
